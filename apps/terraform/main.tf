@@ -2,7 +2,8 @@ terraform {
   backend "s3" {
     bucket       = "terraform-state"
     key          = "media"
-    region       = "auto"
+    # region = auto로 지정하면 validation error 발생!!
+    region       = "us-east-1"
     use_lockfile = true
   }
 
