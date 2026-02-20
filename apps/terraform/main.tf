@@ -1,8 +1,8 @@
 terraform {
   backend "s3" {
-    bucket = "terraform-state"
-    key = "media"
-    region = "auto"
+    bucket       = "terraform-state"
+    key          = "media"
+    region       = "auto"
     use_lockfile = true
   }
 
