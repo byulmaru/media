@@ -1,0 +1,73 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: ["apps/terraform/**"]
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Connect Tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TAILSCALE_AUDIENCE }}
+          tags: tag:github-actions
+          ping: ${{ secrets.INFISICAL_DOMAIN }}
+
+      - name: Get secrets from Infisical
+        uses: Infisical/secrets-action@v1
+        with:
+          method: oidc
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          identity-id: ${{ secrets.INFISICAL_IDENTITY_ID }}
+          project-slug: terraform
+          env-slug: prod
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./apps/terraform
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan
+        working-directory: ./apps/terraform
+        continue-on-error: false
+
+      - name: Comment Pull Request
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `
+            <details>
+            <summary>Show Terraform Plan</summary>
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+            </details>
+            `;
+
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: output,
+            });
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-pr-${{ github.event.pull_request.number }}
+          path: apps/terraform/tfplan
