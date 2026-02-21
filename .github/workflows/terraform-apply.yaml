@@ -5,6 +5,7 @@ on:
   pull_request:
     types: [closed]
     paths: ["apps/terraform/**"]
+    branches: ["main"]
 
 jobs:
   apply:
@@ -61,7 +62,7 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: actions/download-artifact@v4
         with:
-          name: tfplan-pr-${{ github.event.pull_request.number }}
+          name: tfplan
           path: apps/terraform
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ steps.find-run.outputs.run-id }}

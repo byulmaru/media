@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+      pull-requests: write
 
     steps:
       - name: Checkout
@@ -40,10 +41,13 @@ jobs:
         working-directory: ./apps/terraform
 
       - name: Terraform Plan
-        id: plan
         run: terraform plan -no-color -out=tfplan
         working-directory: ./apps/terraform
-        continue-on-error: false
+
+      - name: Terraform Show
+        id: show
+        run: terraform show -no-color tfplan
+        working-directory: ./apps/terraform
 
       - name: Comment Pull Request
         uses: actions/github-script@v7
@@ -53,8 +57,9 @@ jobs:
             const output = `
             <details>
             <summary>Show Terraform Plan</summary>
-            \`\`\`
-            ${{ steps.plan.outputs.stdout }}
+
+            \`\`\`hcl
+            ${{ steps.show.outputs.stdout }}
             \`\`\`
             </details>
             `;
@@ -69,5 +74,5 @@ jobs:
       - name: Upload Plan Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan-pr-${{ github.event.pull_request.number }}
+          name: tfplan
           path: apps/terraform/tfplan
