@@ -23,6 +23,7 @@
         "@hono/standard-validator": "^0.2.2",
         "hono": "^4.12.1",
         "sharp": "^0.34.5",
+        "thumbhash": "^0.1.1",
         "ulidx": "^2.4.1",
         "zod": "^4.3.6",
       },
@@ -682,6 +683,8 @@
     "supports-color": ["supports-color@7.2.0", "", { "dependencies": { "has-flag": "^4.0.0" } }, "sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw=="],
 
     "supports-preserve-symlinks-flag": ["supports-preserve-symlinks-flag@1.0.0", "", {}, "sha512-ot0WnXS9fgdkgIcePe6RHNk1WA8+muPa6cSjeR3V8K27q9BB1rTE3R1p7Hv0z1ZyAc8s6Vvv8DIyWf681MAt0w=="],
+
+    "thumbhash": ["thumbhash@0.1.1", "", {}, "sha512-kH5pKeIIBPQXAOni2AiY/Cu/NKdkFREdpH+TLdM0g6WA7RriCv0kPLgP731ady67MhTAqrVG/4mnEeibVuCJcg=="],
 
     "tinyglobby": ["tinyglobby@0.2.15", "", { "dependencies": { "fdir": "^6.5.0", "picomatch": "^4.0.3" } }, "sha512-j2Zq4NyQYG5XMST4cbs02Ak8iJUdxRM0XI5QyxXuZOzKOINmWurp3smXu3y5wDcJrptwpSjgXHzIQxR0omXljQ=="],
 
