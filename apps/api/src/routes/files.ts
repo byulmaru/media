@@ -2,6 +2,7 @@ import { Readable } from 'node:stream';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { sValidator } from '@hono/standard-validator';
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import sharp from 'sharp';
 import { rgbaToThumbHash } from 'thumbhash';
 import { ulid } from 'ulidx';
@@ -26,7 +27,6 @@ app.post(
     const { file } = c.req.valid('form');
 
     const image = sharp({ animated: true });
-    Readable.fromWeb(file.stream()).pipe(image);
     const upload = Readable.toWeb(
       image
         .resize({
@@ -39,30 +39,33 @@ app.post(
     );
 
     const id = ulid();
-    const [, placeholder] = await Promise.all([
-      r2.send(
-        new PutObjectCommand({
-          Bucket: Bun.env.R2_BUCKET,
-          Key: `uploads/${id}`,
-          Body: upload,
-          ContentType: 'image/webp',
-        }),
-      ),
-      image
-        .clone()
-        .resize({
-          width: 100,
-          height: 100,
-          fit: 'inside',
-          withoutEnlargement: true,
-        })
-        .ensureAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true })
-        .then((raw) => rgbaToThumbHash(raw.info.width, raw.info.height, raw.data).toBase64()),
-    ]).catch((e) => {
+    const uploadFile = r2.send(
+      new PutObjectCommand({
+        Bucket: Bun.env.R2_BUCKET,
+        Key: `uploads/${id}`,
+        Body: upload,
+        ContentType: 'image/webp',
+      }),
+    );
+
+    const createPlaceholder = image
+      .clone()
+      .resize({
+        width: 100,
+        height: 100,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+      .then((raw) => rgbaToThumbHash(raw.info.width, raw.info.height, raw.data).toBase64());
+
+    Readable.fromWeb(file.stream()).pipe(image);
+
+    const [, placeholder] = await Promise.all([uploadFile, createPlaceholder]).catch((e) => {
       console.error(e);
-      return c.json({ error: 'Failed to upload file' }, 500);
+      throw new HTTPException(500);
     });
 
     return c.json({ id, url: `${Bun.env.CDN_DOMAIN}/uploads/${id}`, placeholder });
