@@ -23,4 +23,8 @@ terraform {
 
 provider "cloudflare" {}
 
-provider "infisical" {}
+provider "infisical" {
+  auth = {
+    oidc = {}
+  }
+}
