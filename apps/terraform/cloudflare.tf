@@ -1,5 +1,3 @@
-data "cloudflare_account" "byulmaru-coop" {}
-
 data "cloudflare_zone" "byulma-run" {
   filter = {
     name = "byulma.run"
@@ -7,12 +5,12 @@ data "cloudflare_zone" "byulma-run" {
 }
 
 resource "cloudflare_r2_bucket" "media" {
-  account_id = data.cloudflare_account.byulmaru-coop.id
+  account_id = var.cloudflare_account_id
   name       = "media"
 }
 
 resource "cloudflare_r2_custom_domain" "media" {
-  account_id  = data.cloudflare_account.byulmaru-coop.id
+  account_id  = var.cloudflare_account_id
   bucket_name = cloudflare_r2_bucket.media.name
   domain      = "cdn.byulma.run"
   zone_id     = data.cloudflare_zone.byulma-run.id
