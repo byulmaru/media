@@ -1,4 +1,4 @@
 variable "cloudflare_account_id" {
-  type = string
+  type      = string
   sensitive = true
 }
