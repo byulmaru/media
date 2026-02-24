@@ -20,6 +20,6 @@ COPY package.json ./
 
 EXPOSE 3000
 
-USER bun
+USER 1000
 
 CMD ["bun", "run", "apps/api/src/index.ts"]
