@@ -46,16 +46,12 @@ jobs:
       - name: Terraform Init
         run: terraform init
         working-directory: ./apps/terraform
-        env:
-          INFISICAL_HOST: ${{ secrets.INFISICAL_HOST }}
-          INFISICAL_MACHINE_IDENTITY_ID: ${{ secrets.INFISICAL_MACHINE_IDENTITY_ID }}
-          INFISICAL_AUTH_JWT: ${{ steps.oidc-token.outputs.token }}
 
       - name: Terraform Plan
         run: terraform plan -no-color -out=tfplan
         working-directory: ./apps/terraform
         env:
-          INFISICAL_HOST: ${{ secrets.INFISICAL_HOST }}
+          INFISICAL_HOST: https://${{ secrets.INFISICAL_HOST }}
           INFISICAL_MACHINE_IDENTITY_ID: ${{ secrets.INFISICAL_MACHINE_IDENTITY_ID }}
           INFISICAL_AUTH_JWT: ${{ steps.oidc-token.outputs.token }}
 
