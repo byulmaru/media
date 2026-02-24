@@ -1,10 +1,9 @@
 {
   "name": "@byulmaru/media-api",
   "scripts": {
-    "dev": "bun run --hot src/index.ts"
+    "dev": "infisical run -- bun run --hot src/index.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.995.0",
     "@hono/standard-validator": "^0.2.2",
     "hono": "^4.12.1",
     "sharp": "^0.34.5",
