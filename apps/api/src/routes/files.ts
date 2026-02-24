@@ -1,5 +1,4 @@
 import { Readable } from 'node:stream';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { sValidator } from '@hono/standard-validator';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
@@ -26,27 +25,21 @@ app.post(
   async (c) => {
     const { file } = c.req.valid('form');
 
-    const image = sharp({ animated: true });
-    const upload = Readable.toWeb(
-      image
-        .resize({
-          width: 1024,
-          height: 1024,
-          fit: 'inside',
-          withoutEnlargement: true,
-        })
-        .webp(),
-    );
-
     const id = ulid();
-    const uploadFile = r2.send(
-      new PutObjectCommand({
-        Bucket: Bun.env.R2_BUCKET,
-        Key: `uploads/${id}`,
-        Body: upload,
-        ContentType: 'image/webp',
-      }),
-    );
+    const image = sharp({ animated: true });
+    const uploadFile = image
+      .resize({
+        width: 1024,
+        height: 1024,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp()
+      .toBuffer({ resolveWithObject: true })
+      .then(async ({ data, info }) => {
+        await r2.write(`uploads/${id}`, data, { type: 'image/webp' });
+        return info;
+      });
 
     const createPlaceholder = image
       .clone()
@@ -63,12 +56,19 @@ app.post(
 
     Readable.fromWeb(file.stream()).pipe(image);
 
-    const [, placeholder] = await Promise.all([uploadFile, createPlaceholder]).catch((e) => {
-      console.error(e);
-      throw new HTTPException(500);
-    });
+    const [fileInfo, placeholder] = await Promise.all([uploadFile, createPlaceholder]).catch(
+      (e) => {
+        console.error(e);
+        throw new HTTPException(500);
+      },
+    );
 
-    return c.json({ id, url: `${Bun.env.CDN_DOMAIN}/uploads/${id}`, placeholder });
+    return c.json({
+      id,
+      url: `${Bun.env.CDN_DOMAIN}/uploads/${id}`,
+      placeholder,
+      size: fileInfo.size,
+    });
   },
 );
 
