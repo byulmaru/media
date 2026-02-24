@@ -18,6 +18,10 @@ terraform {
       source  = "infisical/infisical"
       version = "~> 0.16"
     }
+    argocd = {
+      source  = "argoproj-labs/argocd"
+      version = "~> 7"
+    }
   }
 }
 
@@ -28,3 +32,5 @@ provider "infisical" {
     oidc = {}
   }
 }
+
+provider "argocd" {}

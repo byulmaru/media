@@ -1,0 +1,57 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/byulmaru/media-api
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readiness:
+    path: /healthz
+    initialDelaySeconds: 3
+    periodSeconds: 5
+
+infisical:
+  identityId: ''
+  projectId: ''
+  envSlug: prod
+  secretName: env
+
+nodeSelector: {}
+tolerations:
+  - key: 'oci.oraclecloud.com/oke-is-preemptible'
+    operator: 'Equal'
+    value: 'present'
+    effect: 'NoSchedule'
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+            - key: oci.oraclecloud.com/oke-is-preemptible
+              operator: Exists
+              values: []

@@ -17,11 +17,6 @@ resource "cloudflare_r2_custom_domain" "media" {
   enabled     = true
 }
 
-resource "infisical_project" "media" {
-  name = "media"
-  slug = "media"
-}
-
 resource "infisical_secret" "cdn_domain" {
   name         = "CDN_DOMAIN"
   value        = "https://${cloudflare_r2_custom_domain.media.domain}"
