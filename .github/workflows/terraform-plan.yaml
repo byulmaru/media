@@ -22,16 +22,23 @@ jobs:
           oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TAILSCALE_AUDIENCE }}
           tags: tag:github-actions
-          ping: ${{ secrets.INFISICAL_DOMAIN }}
+          ping: ${{ secrets.INFISICAL_HOST }}
 
       - name: Get secrets from Infisical
         uses: Infisical/secrets-action@v1.0.15
         with:
           method: oidc
-          domain: https://${{ secrets.INFISICAL_DOMAIN }}
-          identity-id: ${{ secrets.INFISICAL_IDENTITY_ID }}
+          domain: https://${{ secrets.INFISICAL_HOST }}
+          identity-id: ${{ secrets.INFISICAL_MACHINE_IDENTITY_ID }}
           project-slug: terraform
           env-slug: prod
+
+      - name: Get GitHub OIDC Token for Terraform
+        id: oidc-token
+        run: |
+          TOKEN=$(curl -sLS "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ secrets.INFISICAL_HOST }}" \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" | jq -r '.value')
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -43,6 +50,10 @@ jobs:
       - name: Terraform Plan
         run: terraform plan -no-color -out=tfplan
         working-directory: ./apps/terraform
+        env:
+          INFISICAL_HOST: https://${{ secrets.INFISICAL_HOST }}
+          INFISICAL_MACHINE_IDENTITY_ID: ${{ secrets.INFISICAL_MACHINE_IDENTITY_ID }}
+          INFISICAL_AUTH_JWT: ${{ steps.oidc-token.outputs.token }}
 
       - name: Terraform Show
         id: show

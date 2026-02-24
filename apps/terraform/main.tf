@@ -14,7 +14,17 @@ terraform {
       source  = "cloudflare/cloudflare"
       version = "~> 5"
     }
+    infisical = {
+      source  = "infisical/infisical"
+      version = "~> 0.16"
+    }
   }
 }
 
 provider "cloudflare" {}
+
+provider "infisical" {
+  auth = {
+    oidc = {}
+  }
+}
