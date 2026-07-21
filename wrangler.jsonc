@@ -1,0 +1,46 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "byulmaru-media",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "limits": {
+    "cpu_ms": 30000
+  },
+  "vars": {
+    "ALLOWED_ORIGINS": "https://kos.moe"
+  },
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "byulmaru-media"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "REMOTE_IMAGES",
+      "id": "REPLACE_WITH_PRODUCTION_KV_NAMESPACE_ID",
+      "preview_id": "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
+    }
+  ],
+  "env": {
+    "dev": {
+      "name": "byulmaru-media-dev",
+      "vars": {
+        "ALLOWED_ORIGINS": "https://dev.kos.moe,http://localhost:5173,http://localhost:5174"
+      },
+      "r2_buckets": [
+        {
+          "binding": "MEDIA",
+          "bucket_name": "byulmaru-media-dev"
+        }
+      ],
+      "kv_namespaces": [
+        {
+          "binding": "REMOTE_IMAGES",
+          "id": "REPLACE_WITH_DEV_KV_NAMESPACE_ID"
+        }
+      ]
+    }
+  }
+}

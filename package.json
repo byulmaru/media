@@ -1,0 +1,38 @@
+{
+  "name": "@byulmaru/media",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "dry-run": "wrangler deploy --dry-run --env=\"\" --outdir .wrangler/dry-run",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "config:validate": "node scripts/validate-config.mjs",
+    "deployment:validate": "node scripts/validate-config.mjs production",
+    "deployment:validate:dev": "node scripts/validate-config.mjs dev",
+    "dry-run:dev": "wrangler deploy --dry-run --env dev --outdir .wrangler/dry-run-dev",
+    "infra:fmt": "terraform -chdir=terraform fmt -check",
+    "infra:validate": "terraform -chdir=terraform validate"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.9.0",
+    "@jsquash/jpeg": "^1.6.0",
+    "@jsquash/png": "^3.1.0",
+    "@jsquash/resize": "^2.1.1",
+    "@jsquash/webp": "^1.5.0",
+    "hono": "^4.10.8",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.5",
+    "@cloudflare/workers-types": "^5.20260716.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.55.0"
+  },
+  "packageManager": "pnpm@11.10.0"
+}
