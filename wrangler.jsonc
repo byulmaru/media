@@ -19,8 +19,8 @@
   "kv_namespaces": [
     {
       "binding": "REMOTE_IMAGES",
-      "id": "REPLACE_WITH_PRODUCTION_KV_NAMESPACE_ID",
-      "preview_id": "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
+      "id": "431b92f3384241d7abedb845f7fe9231",
+      "preview_id": "a68b219fab934ef4bdefb64e42d9f554"
     }
   ],
   "env": {
@@ -38,7 +38,7 @@
       "kv_namespaces": [
         {
           "binding": "REMOTE_IMAGES",
-          "id": "REPLACE_WITH_DEV_KV_NAMESPACE_ID"
+          "id": "a68b219fab934ef4bdefb64e42d9f554"
         }
       ]
     }
