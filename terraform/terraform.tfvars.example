@@ -1,16 +1,1 @@
 cloudflare_account_id = "0123456789abcdef0123456789abcdef"
-
-# Set a location only when data placement must be constrained. If omitted,
-# Cloudflare automatically selects a location based on the first request.
-# environments = {
-#   production = {
-#     r2_bucket_name = "byulmaru-media"
-#     kv_title       = "byulmaru-media-remote-images"
-#     r2_location    = "apac"
-#   }
-#   dev = {
-#     r2_bucket_name = "byulmaru-media-dev"
-#     kv_title       = "byulmaru-media-remote-images-dev"
-#     r2_location    = "apac"
-#   }
-# }

@@ -12,8 +12,6 @@
     "test:watch": "vitest",
     "config:validate": "node scripts/validate-config.mjs",
     "deployment:validate": "node scripts/validate-config.mjs production",
-    "deployment:validate:dev": "node scripts/validate-config.mjs dev",
-    "dry-run:dev": "wrangler deploy --dry-run --env dev --outdir .wrangler/dry-run-dev",
     "infra:fmt": "terraform -chdir=terraform fmt -check",
     "infra:validate": "terraform -chdir=terraform validate"
   },

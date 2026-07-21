@@ -1,24 +1,17 @@
 resource "cloudflare_r2_bucket" "media" {
-  for_each = var.environments
-
   account_id    = var.cloudflare_account_id
-  name          = each.value.r2_bucket_name
-  location      = each.value.r2_location
+  name          = "byulmaru-media"
   storage_class = "Standard"
 }
 
 resource "cloudflare_workers_kv_namespace" "remote_images" {
-  for_each = var.environments
-
   account_id = var.cloudflare_account_id
-  title      = each.value.kv_title
+  title      = "byulmaru-media-remote-images"
 }
 
 resource "cloudflare_r2_bucket_lifecycle" "media_cache" {
-  for_each = var.environments
-
   account_id  = var.cloudflare_account_id
-  bucket_name = cloudflare_r2_bucket.media[each.key].name
+  bucket_name = cloudflare_r2_bucket.media.name
   rules = [{
     id = "expire-media-cache"
     conditions = {
@@ -32,4 +25,19 @@ resource "cloudflare_r2_bucket_lifecycle" "media_cache" {
       }
     }
   }]
+}
+
+moved {
+  from = cloudflare_r2_bucket.media["production"]
+  to   = cloudflare_r2_bucket.media
+}
+
+moved {
+  from = cloudflare_workers_kv_namespace.remote_images["production"]
+  to   = cloudflare_workers_kv_namespace.remote_images
+}
+
+moved {
+  from = cloudflare_r2_bucket_lifecycle.media_cache["production"]
+  to   = cloudflare_r2_bucket_lifecycle.media_cache
 }

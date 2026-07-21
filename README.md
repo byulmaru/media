@@ -6,7 +6,7 @@ Cloudflare Workers에서 JPEG, PNG, WebP 이미지를 WebP로 정규화해 R2에
 
 ## Setup
 
-R2 버킷, KV namespace, `cache/` prefix의 30일 lifecycle은 [Terraform](./terraform/main.tf)이 dev/prod에 동일하게 관리합니다. Worker 코드 배포와 secret은 Wrangler가 담당합니다. secret 값을 Terraform state에 남기지 않기 위한 경계입니다.
+R2 버킷, KV namespace, `cache/` prefix의 30일 lifecycle은 [Terraform](./terraform/main.tf)이 관리합니다. Worker 코드 배포와 secret은 Wrangler가 담당합니다. secret 값을 Terraform state에 남기지 않기 위한 경계입니다.
 
 Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 관리합니다. Pull request는 plan만 생성하고, `main` push와 수동 실행은 새 plan을 생성한 뒤 같은 실행에서 저장한 `tfplan`을 그대로 적용합니다. State는 기존 `byulmaru-terraform-state` S3 bucket의 `media/terraform.tfstate` key를 사용합니다.
 
@@ -29,26 +29,23 @@ Repository secrets:
 
 2. Terraform 변경 pull request에서 plan artifact와 job summary를 검토합니다. `main`에 병합하면 같은 workflow 실행에서 생성된 saved plan이 적용됩니다.
 
-3. 적용 후 workflow summary의 `wrangler_bindings` output에 나온 KV ID를 [wrangler.jsonc](./wrangler.jsonc)의 해당 production/dev placeholder에 복사합니다. R2 이름도 같은 output과 일치해야 합니다.
+3. 적용 후 workflow summary의 `wrangler_bindings` output이 [wrangler.jsonc](./wrangler.jsonc)의 binding과 일치하는지 확인합니다.
 
-4. production과 dev Worker에 secret을 등록합니다.
+4. Worker에 secret을 등록합니다.
 
    ```sh
    pnpm exec wrangler secret put API_KEY
    pnpm exec wrangler secret put UPLOAD_SIGNING_SECRET
-   pnpm exec wrangler secret put API_KEY --env dev
-   pnpm exec wrangler secret put UPLOAD_SIGNING_SECRET --env dev
    ```
 
-5. 허용 Origin은 production `https://kos.moe`, dev `https://dev.kos.moe`, `http://localhost:5173`, `http://localhost:5174`로 분리되어 있습니다.
-6. 로컬 개발에서는 `.dev.vars`에 `API_KEY`와 32바이트 이상의 `UPLOAD_SIGNING_SECRET`을 넣고 `pnpm dev --env dev`를 실행합니다.
+5. 단일 Worker가 `https://kos.moe`, `https://dev.kos.moe`, `http://localhost:5173`, `http://localhost:5174`를 허용합니다.
+6. 로컬 개발에서는 `.dev.vars`에 `API_KEY`와 32바이트 이상의 `UPLOAD_SIGNING_SECRET`을 넣고 `pnpm dev`를 실행합니다.
 
 배포 전에는 정적 구성과 실제 KV/secret 구성을 모두 검사합니다.
 
 ```sh
 pnpm config:validate
 pnpm deployment:validate
-pnpm deployment:validate:dev
 ```
 
 ## API
