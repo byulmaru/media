@@ -8,7 +8,7 @@
     "cpu_ms": 30000
   },
   "vars": {
-    "ALLOWED_ORIGINS": "https://kos.moe"
+    "ALLOWED_ORIGINS": "https://kos.moe,https://dev.kos.moe,http://localhost:5173,http://localhost:5174"
   },
   "r2_buckets": [
     {
@@ -19,28 +19,7 @@
   "kv_namespaces": [
     {
       "binding": "REMOTE_IMAGES",
-      "id": "431b92f3384241d7abedb845f7fe9231",
-      "preview_id": "a68b219fab934ef4bdefb64e42d9f554"
+      "id": "431b92f3384241d7abedb845f7fe9231"
     }
-  ],
-  "env": {
-    "dev": {
-      "name": "byulmaru-media-dev",
-      "vars": {
-        "ALLOWED_ORIGINS": "https://dev.kos.moe,http://localhost:5173,http://localhost:5174"
-      },
-      "r2_buckets": [
-        {
-          "binding": "MEDIA",
-          "bucket_name": "byulmaru-media-dev"
-        }
-      ],
-      "kv_namespaces": [
-        {
-          "binding": "REMOTE_IMAGES",
-          "id": "a68b219fab934ef4bdefb64e42d9f554"
-        }
-      ]
-    }
-  }
+  ]
 }

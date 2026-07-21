@@ -23,26 +23,24 @@ const checkEnvironment = (name, value, expectedBucket, expectedOrigins) => {
 };
 
 if (config.main !== "src/index.ts") failures.push("Worker entrypoint must be src/index.ts");
-checkEnvironment("production", config, "byulmaru-media", ["https://kos.moe"]);
-checkEnvironment("dev", config.env?.dev ?? {}, "byulmaru-media-dev", [
+checkEnvironment("production", config, "byulmaru-media", [
+  "https://kos.moe",
   "https://dev.kos.moe",
   "http://localhost:5173",
   "http://localhost:5174",
 ]);
 
 const environment = process.argv[2];
-if (environment !== undefined && environment !== "production" && environment !== "dev") {
-  failures.push("deployment environment must be production or dev");
+if (environment !== undefined && environment !== "production") {
+  failures.push("deployment environment must be production");
 }
 if (environment) {
-  const bindings = environment === "dev" ? config.env?.dev : config;
-  const ids = bindings?.kv_namespaces?.map((binding) => binding.id) ?? [];
+  const ids = config.kv_namespaces?.map((binding) => binding.id) ?? [];
   if (ids.length === 0 || ids.some((id) => !/^[0-9a-f]{32}$/.test(id))) {
     failures.push(`${environment} KV namespace IDs are not deployable`);
   }
   if (failures.length === 0) {
     const args = ["exec", "wrangler", "secret", "list", "--format", "json"];
-    if (environment === "dev") args.push("--env", "dev");
     const result = spawnSync("pnpm", args, { encoding: "utf8" });
     if (result.status !== 0) {
       failures.push(result.stderr.trim() || "could not list Worker secrets");

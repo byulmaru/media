@@ -8,26 +8,6 @@ variable "cloudflare_account_id" {
   }
 }
 
-variable "environments" {
-  description = "R2 and KV names managed for each Worker environment."
-  type = map(object({
-    r2_bucket_name = string
-    kv_title       = string
-    r2_location    = optional(string)
-  }))
-
-  default = {
-    production = {
-      r2_bucket_name = "byulmaru-media"
-      kv_title       = "byulmaru-media-remote-images"
-    }
-    dev = {
-      r2_bucket_name = "byulmaru-media-dev"
-      kv_title       = "byulmaru-media-remote-images-dev"
-    }
-  }
-}
-
 variable "cache_retention_seconds" {
   description = "Age after which objects under cache/ are deleted."
   type        = number
