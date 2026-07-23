@@ -52,6 +52,61 @@ describe("media API", () => {
     expect(unknown.status).toBe(400);
   });
 
+  it("authenticates and validates upload completion checks", async () => {
+    const id = `u_${crypto.randomUUID()}`;
+    const unauthorized = await worker.fetch(`https://media.example.com/v1/uploads/${id}`, {
+      method: "HEAD",
+    });
+    const malformed = await worker.fetch("https://media.example.com/v1/uploads/not-an-id", {
+      method: "HEAD",
+      headers: authHeaders,
+    });
+    const get = await worker.fetch(`https://media.example.com/v1/uploads/${id}`, {
+      headers: authHeaders,
+    });
+
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("Cache-Control")).toBe("no-store");
+    expect(await unauthorized.text()).toBe("");
+    expect(malformed.status).toBe(400);
+    expect(malformed.headers.get("Cache-Control")).toBe("no-store");
+    expect(await malformed.text()).toBe("");
+    expect(get.status).toBe(405);
+    expect(get.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("reports completion only after the immutable original is stored", async () => {
+    const ticket = await createUpload(worker);
+    const statusUrl = `https://media.example.com/v1/uploads/${ticket.id}`;
+
+    const pending = await worker.fetch(statusUrl, { method: "HEAD", headers: authHeaders });
+    expect(pending.status).toBe(404);
+    expect(pending.headers.get("Cache-Control")).toBe("no-store");
+    expect(await pending.text()).toBe("");
+
+    const failed = await worker.fetch(ticket.uploadUrl, {
+      method: "PUT",
+      headers: { Origin: "https://app.example.com", "Content-Type": "image/jpeg" },
+      body: PNG_1X1,
+    });
+    expect(failed.status).toBe(415);
+    expect(
+      (await worker.fetch(statusUrl, { method: "HEAD", headers: authHeaders })).status,
+    ).toBe(404);
+
+    const upload = await worker.fetch(ticket.uploadUrl, {
+      method: "PUT",
+      headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
+      body: PNG_1X1,
+    });
+    expect(upload.status).toBe(201);
+
+    const completed = await worker.fetch(statusUrl, { method: "HEAD", headers: authHeaders });
+    expect(completed.status).toBe(204);
+    expect(completed.headers.get("Cache-Control")).toBe("no-store");
+    expect(await completed.text()).toBe("");
+  });
+
   it("creates a browser upload URL and stores an immutable WebP", async () => {
     const ticket = await createUpload(worker);
     expect(ticket.id).toMatch(/^u_/);

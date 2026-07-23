@@ -95,6 +95,22 @@ Content-Type: image/png
 
 검증이나 인코딩 실패는 URL을 소비하지 않습니다. 최초 R2 저장 성공 후 같은 URL을 다시 사용하면 `409`를 반환합니다.
 
+### Check upload completion
+
+Kosmo backend는 실제 소비 시점에 이미지 본문이나 공개 CDN을 거치지 않고 저장 완료를 확인합니다.
+
+```http
+HEAD /v1/uploads/u_...
+Authorization: Bearer <API_KEY>
+```
+
+- immutable 원본이 저장됨: `204 No Content`
+- 아직 저장되지 않음: `404 Not Found`
+- 잘못된 ID: `400 Bad Request`
+- 모든 응답: `Cache-Control: no-store`
+
+이 endpoint는 R2 binding의 object metadata만 확인하며 Account/Profile 소유권을 판단하지 않습니다.
+
 ## Security and limits
 
 - source body: 최대 16 MiB

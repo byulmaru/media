@@ -9,7 +9,11 @@ import { assertImageWithinLimits, inspectImage } from "../image-info";
 import { apiKeyAuth } from "../middleware/auth";
 import { signUploadToken, verifyUploadToken } from "../token";
 import type { AppEnv } from "../types";
-import { throwOnValidationError, uploadRequestSchema } from "../validation";
+import {
+  throwOnValidationError,
+  uploadIdParamSchema,
+  uploadRequestSchema,
+} from "../validation";
 
 const acceptedContentTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 
@@ -62,6 +66,32 @@ uploads.post(
       },
       201,
     );
+  },
+);
+
+// Hono dispatches HEAD through GET handlers and removes the response body.
+uploads.get(
+  "/:id",
+  async (c, next) => {
+    if (c.req.method !== "HEAD") {
+      throw new HttpError(405, "method_not_allowed", "use HEAD to check upload completion");
+    }
+    await next();
+  },
+  apiKeyAuth,
+  zValidator("param", uploadIdParamSchema, (result) => {
+    if (!result.success) {
+      throw new HttpError(
+        400,
+        "invalid_upload_id",
+        result.error.issues[0]?.message ?? "upload ID is invalid",
+      );
+    }
+  }),
+  async (c) => {
+    const { id } = c.req.valid("param");
+    c.header("Cache-Control", "no-store");
+    return c.body(null, (await c.env.MEDIA.head(`original/${id}.webp`)) ? 204 : 404);
   },
 );
 
