@@ -30,6 +30,7 @@ env:
   TF_STATE_BUCKET: byulmaru-terraform-state
   TF_STATE_KEY: media/terraform.tfstate
   TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+  TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
 jobs:
@@ -47,6 +48,7 @@ jobs:
         run: |
           [[ -n "${AWS_ROLE_ARN}" ]] || { echo "Missing repository variable: AWS_ROLE_ARN" >&2; exit 1; }
           [[ -n "${TF_VAR_cloudflare_account_id}" ]] || { echo "Missing repository variable: CLOUDFLARE_ACCOUNT_ID" >&2; exit 1; }
+          [[ -n "${TF_VAR_cloudflare_zone_id}" ]] || { echo "Missing repository variable: CLOUDFLARE_ZONE_ID" >&2; exit 1; }
           [[ -n "${CLOUDFLARE_API_TOKEN}" ]] || { echo "Missing repository secret: CLOUDFLARE_API_TOKEN" >&2; exit 1; }
 
       - name: Configure AWS credentials

@@ -1,18 +1,15 @@
 import decodeJpeg, { init as initJpegDecode } from "@jsquash/jpeg/decode.js";
 import decodePng, { init as initPngDecode } from "@jsquash/png/decode.js";
-import resize, { initResize } from "@jsquash/resize";
 import decodeWebp, { init as initWebpDecode } from "@jsquash/webp/decode.js";
 import encodeWebp, { init as initWebpEncode } from "@jsquash/webp/encode.js";
 
 import jpegDecodeWasm from "@jsquash/jpeg/codec/dec/mozjpeg_dec.wasm";
 // @ts-expect-error Wrangler exposes imported Wasm files as default WebAssembly.Module values.
 import pngWasm from "@jsquash/png/codec/pkg/squoosh_png_bg.wasm";
-// @ts-expect-error Wrangler exposes imported Wasm files as default WebAssembly.Module values.
-import resizeWasm from "@jsquash/resize/lib/resize/pkg/squoosh_resize_bg.wasm";
 import webpDecodeWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
 import webpEncodeWasm from "@jsquash/webp/codec/enc/webp_enc_simd.wasm";
 
-import { THUMBNAIL_DIMENSION, WEBP_QUALITY } from "./constants";
+import { WEBP_QUALITY } from "./constants";
 import { HttpError } from "./errors";
 import type { ImageFormat } from "./types";
 
@@ -36,7 +33,6 @@ if (!(globalThis as unknown as { ImageData?: ImageDataConstructor }).ImageData) 
 const ready = Promise.all([
   (initJpegDecode as unknown as (module: WebAssembly.Module) => Promise<void>)(jpegDecodeWasm),
   initPngDecode(pngWasm),
-  initResize(resizeWasm),
   (initWebpDecode as unknown as (module: WebAssembly.Module) => Promise<void>)(webpDecodeWasm),
   (initWebpEncode as unknown as (module: WebAssembly.Module) => Promise<void>)(webpEncodeWasm),
 ]);
@@ -85,26 +81,4 @@ export async function transcodeOriginal(
 ): Promise<{ bytes: ArrayBuffer; width: number; height: number }> {
   const image = await decode(buffer, format);
   return { bytes: await encode(image), width: image.width, height: image.height };
-}
-
-export async function makeThumbnail(
-  buffer: ArrayBuffer,
-  format: ImageFormat,
-): Promise<{ bytes: ArrayBuffer; width: number; height: number }> {
-  const image = await decode(buffer, format);
-  const scale = Math.min(1, THUMBNAIL_DIMENSION / Math.max(image.width, image.height));
-  const width = Math.max(1, Math.round(image.width * scale));
-  const height = Math.max(1, Math.round(image.height * scale));
-  const output =
-    width === image.width && height === image.height
-      ? image
-      : await resize(image, {
-          width,
-          height,
-          method: "lanczos3",
-          fitMethod: "stretch",
-          premultiply: true,
-          linearRGB: true,
-        });
-  return { bytes: await encode(output), width, height };
 }

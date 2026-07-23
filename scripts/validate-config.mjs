@@ -11,7 +11,7 @@ const { config, error } = ts.parseConfigFileTextToJson(
 if (error) throw new Error(error.messageText);
 
 const failures = [];
-const checkEnvironment = (name, value, expectedBucket, expectedOrigins) => {
+const checkEnvironment = (name, value, expectedBucket, expectedOrigins, expectedPublicBaseUrl) => {
   const media = value.r2_buckets?.filter((binding) => binding.binding === "MEDIA") ?? [];
   if (media.length !== 1 || media[0].bucket_name !== expectedBucket) {
     failures.push(`${name} must bind MEDIA to ${expectedBucket}`);
@@ -19,6 +19,12 @@ const checkEnvironment = (name, value, expectedBucket, expectedOrigins) => {
   const origins = value.vars?.ALLOWED_ORIGINS?.split(",").sort() ?? [];
   if (origins.join() !== [...expectedOrigins].sort().join()) {
     failures.push(`${name} ALLOWED_ORIGINS must be ${expectedOrigins.join(",")}`);
+  }
+  if (value.vars?.PUBLIC_BASE_URL !== expectedPublicBaseUrl) {
+    failures.push(`${name} PUBLIC_BASE_URL must be ${expectedPublicBaseUrl}`);
+  }
+  if ((value.kv_namespaces?.length ?? 0) !== 0) {
+    failures.push(`${name} must not configure KV namespaces`);
   }
 };
 
@@ -28,17 +34,13 @@ checkEnvironment("production", config, "byulmaru-media", [
   "https://dev.kos.moe",
   "http://localhost:5173",
   "http://localhost:5174",
-]);
+], "https://media.kos.moe");
 
 const environment = process.argv[2];
 if (environment !== undefined && environment !== "production") {
   failures.push("deployment environment must be production");
 }
 if (environment) {
-  const ids = config.kv_namespaces?.map((binding) => binding.id) ?? [];
-  if (ids.length === 0 || ids.some((id) => !/^[0-9a-f]{32}$/.test(id))) {
-    failures.push(`${environment} KV namespace IDs are not deployable`);
-  }
   if (failures.length === 0) {
     const args = ["exec", "wrangler", "secret", "list", "--format", "json"];
     const result = spawnSync("pnpm", args, { encoding: "utf8" });

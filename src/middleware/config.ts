@@ -14,17 +14,23 @@ export const requireConfig = createMiddleware<AppEnv>(async (c, next) => {
       return false;
     }
   });
+  let validPublicBaseUrl = false;
+  try {
+    validPublicBaseUrl =
+      new URL(c.env.PUBLIC_BASE_URL).origin === c.env.PUBLIC_BASE_URL;
+  } catch {
+    // Handled by the fail-closed check below.
+  }
   if (
     !c.env.API_KEY ||
     !c.env.UPLOAD_SIGNING_SECRET ||
     c.env.UPLOAD_SIGNING_SECRET.length < 32 ||
     !validOrigins ||
     origins.length === 0 ||
+    !validPublicBaseUrl ||
     typeof c.env.MEDIA?.get !== "function" ||
     typeof c.env.MEDIA?.head !== "function" ||
-    typeof c.env.MEDIA?.put !== "function" ||
-    typeof c.env.REMOTE_IMAGES?.get !== "function" ||
-    typeof c.env.REMOTE_IMAGES?.put !== "function"
+    typeof c.env.MEDIA?.put !== "function"
   ) {
     throw new HttpError(500, "configuration_error", "service configuration is incomplete");
   }
