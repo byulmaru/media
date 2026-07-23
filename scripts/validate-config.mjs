@@ -29,6 +29,9 @@ const checkEnvironment = (name, value, expectedBucket, expectedOrigins, expected
 };
 
 if (config.main !== "src/index.ts") failures.push("Worker entrypoint must be src/index.ts");
+if (config.limits?.cpu_ms !== undefined) {
+  failures.push("production must use the Cloudflare plan's default CPU limit");
+}
 const productionRoutes = config.routes ?? [];
 if (
   productionRoutes.length !== 1 ||
