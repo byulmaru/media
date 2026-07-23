@@ -1,11 +1,25 @@
 import { env, exports } from "cloudflare:workers";
+import decodeWebp, { init as initWebpDecode } from "@jsquash/webp/decode.js";
 import { describe, expect, it } from "vitest";
 
+import webpDecodeWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
+
 import { inspectImage } from "../src/image-info";
-import { authHeaders, createUpload, PNG_1X1 } from "./helpers";
+import {
+  authHeaders,
+  createUpload,
+  JPEG_2X1,
+  JPEG_ORIENTED_2X1,
+  PNG_1X1,
+  PNG_RGBA_2X1,
+  WEBP_RGBA_2X1,
+} from "./helpers";
 
 describe("media API", () => {
   const worker = (exports as unknown as { default: Fetcher }).default;
+  const webpReady = (
+    initWebpDecode as unknown as (module: WebAssembly.Module) => Promise<void>
+  )(webpDecodeWasm);
 
   it("requires authentication to create upload URLs", async () => {
     const upload = await worker.fetch("https://media.example.com/v1/uploads", {
@@ -79,6 +93,75 @@ describe("media API", () => {
     ).toBe(404);
   });
 
+  it.each([
+    ["JPEG", "image/jpeg", JPEG_2X1],
+    ["WebP", "image/webp", WEBP_RGBA_2X1],
+  ] as const)("accepts and normalizes a valid %s upload", async (_name, contentType, body) => {
+    const ticket = await createUpload(worker);
+    const response = await worker.fetch(ticket.uploadUrl, {
+      method: "PUT",
+      headers: { Origin: "https://app.example.com", "Content-Type": contentType },
+      body,
+    });
+
+    expect(response.status).toBe(201);
+    const original = await env.MEDIA.get(`original/${ticket.id}.webp`);
+    expect(inspectImage(await original!.arrayBuffer())).toMatchObject({
+      format: "webp",
+      width: 2,
+      height: 1,
+    });
+  });
+
+  it("applies JPEG EXIF orientation before storing the WebP", async () => {
+    const ticket = await createUpload(worker);
+    const response = await worker.fetch(ticket.uploadUrl, {
+      method: "PUT",
+      headers: { Origin: "https://app.example.com", "Content-Type": "image/jpeg" },
+      body: JPEG_ORIENTED_2X1,
+    });
+
+    expect(response.status).toBe(201);
+    const original = await env.MEDIA.get(`original/${ticket.id}.webp`);
+    expect(inspectImage(await original!.arrayBuffer())).toMatchObject({
+      format: "webp",
+      width: 1,
+      height: 2,
+    });
+  });
+
+  it("preserves transparent PNG alpha in the stored WebP", async () => {
+    const ticket = await createUpload(worker);
+    const response = await worker.fetch(ticket.uploadUrl, {
+      method: "PUT",
+      headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
+      body: PNG_RGBA_2X1,
+    });
+
+    expect(response.status).toBe(201);
+    const original = await env.MEDIA.get(`original/${ticket.id}.webp`);
+    await webpReady;
+    const decoded = await decodeWebp(await original!.arrayBuffer());
+    expect(decoded).toMatchObject({ width: 2, height: 1 });
+    expect(decoded.data[7]).toBe(0);
+  });
+
+  it.each([
+    ["PNG", "image/png", PNG_RGBA_2X1.slice(0, 30)],
+    ["JPEG", "image/jpeg", JPEG_2X1.slice(0, 100)],
+    ["WebP", "image/webp", WEBP_RGBA_2X1.slice(0, 25)],
+  ] as const)("rejects a truncated %s upload", async (_name, contentType, body) => {
+    const ticket = await createUpload(worker);
+    const response = await worker.fetch(ticket.uploadUrl, {
+      method: "PUT",
+      headers: { Origin: "https://app.example.com", "Content-Type": contentType },
+      body,
+    });
+
+    expect(response.status).toBe(422);
+    expect(await env.MEDIA.head(`original/${ticket.id}.webp`)).toBeNull();
+  });
+
   it("enforces upload origin and content type", async () => {
     const ticket = await createUpload(worker);
     const blocked = await worker.fetch(ticket.uploadUrl, {
@@ -97,6 +180,24 @@ describe("media API", () => {
     expect(mismatch.headers.get("Access-Control-Allow-Origin")).toBe(
       "https://app.example.com",
     );
+  });
+
+  it("allows a valid retry after a failed upload", async () => {
+    const ticket = await createUpload(worker);
+    const failed = await worker.fetch(ticket.uploadUrl, {
+      method: "PUT",
+      headers: { Origin: "https://app.example.com", "Content-Type": "image/jpeg" },
+      body: PNG_1X1,
+    });
+    expect(failed.status).toBe(415);
+
+    const retried = await worker.fetch(ticket.uploadUrl, {
+      method: "PUT",
+      headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
+      body: PNG_1X1,
+    });
+    expect(retried.status).toBe(201);
+    expect(await env.MEDIA.head(`original/${ticket.id}.webp`)).not.toBeNull();
   });
 
   it("allows only one winner for concurrent uploads", async () => {

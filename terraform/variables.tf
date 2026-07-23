@@ -17,14 +17,3 @@ variable "cloudflare_zone_id" {
     error_message = "cloudflare_zone_id must be a 32-character hexadecimal Cloudflare zone ID."
   }
 }
-
-variable "public_media_domain" {
-  description = "Public custom domain connected directly to the media R2 bucket."
-  type        = string
-  default     = "media.kos.moe"
-
-  validation {
-    condition     = var.public_media_domain == "media.kos.moe"
-    error_message = "public_media_domain must be media.kos.moe."
-  }
-}
