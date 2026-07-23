@@ -9,7 +9,7 @@ variable "cloudflare_account_id" {
 }
 
 variable "cloudflare_zone_id" {
-  description = "Cloudflare zone ID for kos.moe."
+  description = "Cloudflare zone ID for byulma.run."
   type        = string
 
   validation {

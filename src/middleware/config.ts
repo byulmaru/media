@@ -28,7 +28,6 @@ export const requireConfig = createMiddleware<AppEnv>(async (c, next) => {
     !validOrigins ||
     origins.length === 0 ||
     !validPublicBaseUrl ||
-    typeof c.env.MEDIA?.get !== "function" ||
     typeof c.env.MEDIA?.head !== "function" ||
     typeof c.env.MEDIA?.put !== "function"
   ) {
