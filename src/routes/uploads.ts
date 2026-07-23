@@ -7,7 +7,6 @@ import { IMMUTABLE_CACHE_CONTROL, UPLOAD_TOKEN_TTL_SECONDS } from "../constants"
 import { HttpError } from "../errors";
 import { assertImageWithinLimits, inspectImage } from "../image-info";
 import { apiKeyAuth } from "../middleware/auth";
-import { originalKey } from "../storage";
 import { signUploadToken, verifyUploadToken } from "../token";
 import type { AppEnv } from "../types";
 import { throwOnValidationError, uploadRequestSchema } from "../validation";
@@ -68,7 +67,7 @@ uploads.post(
 
 uploads.put("/:token", async (c) => {
   const payload = await verifyUploadToken(c.req.param("token"), c.env.UPLOAD_SIGNING_SECRET);
-  const key = originalKey(payload.id);
+  const key = `original/${payload.id}.webp`;
   if (await c.env.MEDIA.head(key)) {
     throw new HttpError(409, "already_uploaded", "upload URL has already been used");
   }
@@ -106,12 +105,7 @@ uploads.put("/:token", async (c) => {
       contentType: "image/webp",
       cacheControl: IMMUTABLE_CACHE_CONTROL,
     },
-    customMetadata: {
-      width: String(output.width),
-      height: String(output.height),
-      sourceFormat: info.format,
-    },
   });
   if (!stored) throw new HttpError(409, "already_uploaded", "upload URL has already been used");
-  return c.json({ id: payload.id }, 201);
+  return c.json({ id: payload.id, url: `${c.env.PUBLIC_BASE_URL}/${key}` }, 201);
 });

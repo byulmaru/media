@@ -8,13 +8,12 @@ variable "cloudflare_account_id" {
   }
 }
 
-variable "cache_retention_seconds" {
-  description = "Age after which objects under cache/ are deleted."
-  type        = number
-  default     = 30 * 24 * 60 * 60
+variable "cloudflare_zone_id" {
+  description = "Cloudflare zone ID for byulma.run."
+  type        = string
 
   validation {
-    condition     = var.cache_retention_seconds >= 86400
-    error_message = "cache_retention_seconds must be at least one day."
+    condition     = can(regex("^[0-9a-f]{32}$", var.cloudflare_zone_id))
+    error_message = "cloudflare_zone_id must be a 32-character hexadecimal Cloudflare zone ID."
   }
 }

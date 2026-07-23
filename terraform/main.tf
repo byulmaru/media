@@ -4,40 +4,25 @@ resource "cloudflare_r2_bucket" "media" {
   storage_class = "Standard"
 }
 
-resource "cloudflare_workers_kv_namespace" "remote_images" {
-  account_id = var.cloudflare_account_id
-  title      = "byulmaru-media-remote-images"
+resource "cloudflare_r2_custom_domain" "media" {
+  account_id  = var.cloudflare_account_id
+  bucket_name = cloudflare_r2_bucket.media.name
+  domain      = "media.byulma.run"
+  enabled     = true
+  zone_id     = var.cloudflare_zone_id
+  min_tls     = "1.2"
 }
 
-resource "cloudflare_r2_bucket_lifecycle" "media_cache" {
+resource "cloudflare_r2_bucket_cors" "media" {
   account_id  = var.cloudflare_account_id
   bucket_name = cloudflare_r2_bucket.media.name
   rules = [{
-    id = "expire-media-cache"
-    conditions = {
-      prefix = "cache/"
+    id = "public-read"
+    allowed = {
+      methods = ["GET", "HEAD"]
+      origins = ["*"]
     }
-    enabled = true
-    delete_objects_transition = {
-      condition = {
-        max_age = var.cache_retention_seconds
-        type    = "Age"
-      }
-    }
+    expose_headers  = ["Content-Length", "Content-Type", "ETag"]
+    max_age_seconds = 86400
   }]
-}
-
-moved {
-  from = cloudflare_r2_bucket.media["production"]
-  to   = cloudflare_r2_bucket.media
-}
-
-moved {
-  from = cloudflare_workers_kv_namespace.remote_images["production"]
-  to   = cloudflare_workers_kv_namespace.remote_images
-}
-
-moved {
-  from = cloudflare_r2_bucket_lifecycle.media_cache["production"]
-  to   = cloudflare_r2_bucket_lifecycle.media_cache
 }

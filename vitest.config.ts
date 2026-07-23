@@ -11,6 +11,7 @@ export default defineConfig({
           API_KEY: "test-api-key",
           UPLOAD_SIGNING_SECRET: "test-signing-secret-at-least-32-bytes",
           ALLOWED_ORIGINS: "https://app.example.com",
+          PUBLIC_BASE_URL: "https://media.byulma.run",
         },
       },
     }),

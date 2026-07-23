@@ -35,14 +35,30 @@ describe("image inspection and limits", () => {
     expect(() =>
       uploadRequestSchema.parse({ maxBytes: 16 * 1024 * 1024 + 1 }),
     ).toThrow();
+    expect(uploadRequestSchema.parse({
+      maxBytes: 16 * 1024 * 1024,
+      maxDimension: 8192,
+    })).toEqual({
+      maxBytes: 16 * 1024 * 1024,
+      maxDimension: 8192,
+    });
   });
 
   it("enforces the long-edge and total-pixel limits", () => {
     expect(() =>
+      assertImageWithinLimits(8192, 1, { maxBytes: 1024, maxDimension: 8192 }),
+    ).not.toThrow();
+    expect(() =>
+      assertImageWithinLimits(4096, 2048, { maxBytes: 1024, maxDimension: 8192 }),
+    ).not.toThrow();
+    expect(() =>
       assertImageWithinLimits(801, 600, { maxBytes: 1024, maxDimension: 800 }),
     ).toThrowError(HttpError);
     expect(() =>
-      assertImageWithinLimits(4096, 4096, { maxBytes: 1024, maxDimension: 8192 }),
+      assertImageWithinLimits(8193, 1, { maxBytes: 1024, maxDimension: 8192 }),
+    ).toThrowError(HttpError);
+    expect(() =>
+      assertImageWithinLimits(4097, 2048, { maxBytes: 1024, maxDimension: 8192 }),
     ).toThrowError(HttpError);
   });
 });

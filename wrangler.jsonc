@@ -7,19 +7,20 @@
   "limits": {
     "cpu_ms": 30000
   },
+  "routes": [
+    {
+      "pattern": "media-api.byulmaru.co",
+      "custom_domain": true
+    }
+  ],
   "vars": {
-    "ALLOWED_ORIGINS": "https://kos.moe,https://dev.kos.moe,http://localhost:5173,http://localhost:5174"
+    "ALLOWED_ORIGINS": "https://kos.moe,https://dev.kos.moe,http://localhost:5173,http://localhost:5174",
+    "PUBLIC_BASE_URL": "https://media.byulma.run"
   },
   "r2_buckets": [
     {
       "binding": "MEDIA",
       "bucket_name": "byulmaru-media"
-    }
-  ],
-  "kv_namespaces": [
-    {
-      "binding": "REMOTE_IMAGES",
-      "id": "431b92f3384241d7abedb845f7fe9231"
     }
   ]
 }

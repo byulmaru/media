@@ -2,7 +2,6 @@ import { z } from "zod";
 
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_DIMENSION } from "./constants";
 import { HttpError } from "./errors";
-import { validateRemoteUrl } from "./remote";
 
 const limits = {
   maxBytes: z
@@ -20,21 +19,6 @@ const limits = {
 };
 
 export const uploadRequestSchema = z.strictObject(limits);
-
-export const remoteRequestSchema = z.strictObject({
-  ...limits,
-  url: z.string().transform((value, context) => {
-    try {
-      return validateRemoteUrl(value).href;
-    } catch (error) {
-      context.addIssue({
-        code: "custom",
-        message: error instanceof Error ? error.message : "remote URL is invalid",
-      });
-      return z.NEVER;
-    }
-  }),
-});
 
 export function throwOnValidationError(result: {
   success: boolean;
