@@ -29,12 +29,20 @@ const checkEnvironment = (name, value, expectedBucket, expectedOrigins, expected
 };
 
 if (config.main !== "src/index.ts") failures.push("Worker entrypoint must be src/index.ts");
+const productionRoutes = config.routes ?? [];
+if (
+  productionRoutes.length !== 1 ||
+  productionRoutes[0].pattern !== "media-api.byulmaru.co" ||
+  productionRoutes[0].custom_domain !== true
+) {
+  failures.push("production must expose the Worker at media-api.byulmaru.co");
+}
 checkEnvironment("production", config, "byulmaru-media", [
   "https://kos.moe",
   "https://dev.kos.moe",
   "http://localhost:5173",
   "http://localhost:5174",
-], "https://media.kos.moe");
+], "https://media.byulma.run");
 
 const environment = process.argv[2];
 if (environment !== undefined && environment !== "production") {

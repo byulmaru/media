@@ -1,6 +1,6 @@
 # byulmaru media
 
-Cloudflare Worker가 JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 R2에 저장하는 업로드 서비스입니다. Worker는 signed upload만 담당하고, 저장된 원본은 `https://media.kos.moe`에 연결된 R2 bucket에서 직접 제공합니다.
+Cloudflare Worker가 JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 R2에 저장하는 업로드 서비스입니다. API Worker는 `https://media-api.byulmaru.co`에서 signed upload를 담당하고, 저장된 원본은 `https://media.byulma.run`에 연결된 R2 bucket에서 직접 제공합니다.
 
 이미지 변환에는 Cloudflare Images 대신 Worker-compatible 단일 스레드 WASM인 jSquash를 사용합니다.
 
@@ -10,7 +10,7 @@ Cloudflare Worker가 JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하
 2. Worker가 `u_<UUIDv4>` ID와 10분짜리 signed upload URL을 반환합니다.
 3. 브라우저가 signed URL에 원본 이미지를 `PUT`합니다.
 4. Worker가 이미지 제한을 검증하고 WebP로 변환해 `original/<id>.webp`에 한 번만 저장합니다.
-5. 성공 응답의 `url`은 `https://media.kos.moe/original/<id>.webp`를 가리킵니다.
+5. 성공 응답의 `url`은 `https://media.byulma.run/original/<id>.webp`를 가리킵니다.
 6. 이미지 GET과 HEAD는 Worker를 통하지 않고 R2 custom domain으로 전달됩니다.
 
 Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포함하지 않습니다.
@@ -20,10 +20,10 @@ Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포
 [Terraform](./terraform/main.tf)은 다음 Cloudflare 리소스를 관리합니다.
 
 - `byulmaru-media` R2 bucket
-- `media.kos.moe` R2 custom domain
+- `media.byulma.run` R2 custom domain
 - 공개 GET/HEAD를 위한 R2 CORS
 
-Worker 코드 배포와 secret은 Wrangler가 담당합니다. secret 값을 Terraform state에 남기지 않기 위한 경계입니다.
+Worker 코드, `media-api.byulmaru.co` custom domain과 secret은 Wrangler가 담당합니다. secret 값을 Terraform state에 남기지 않기 위한 경계입니다.
 
 Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 실행합니다. Pull request에서는 plan만 만들고, `main` push와 수동 실행에서는 새 saved plan을 생성해 그대로 적용합니다. State는 `byulmaru-terraform-state` S3 bucket의 `media/terraform.tfstate` key를 사용합니다.
 
@@ -31,7 +31,7 @@ Repository variables:
 
 - `AWS_ROLE_ARN`: state bucket에 접근할 GitHub Actions OIDC role
 - `CLOUDFLARE_ACCOUNT_ID`: media 리소스를 소유할 Cloudflare account ID
-- `CLOUDFLARE_ZONE_ID`: `kos.moe` Cloudflare zone ID
+- `CLOUDFLARE_ZONE_ID`: `byulma.run` Cloudflare zone ID
 
 Repository secrets:
 
@@ -89,7 +89,7 @@ Content-Type: image/png
 ```json
 {
   "id": "u_...",
-  "url": "https://media.kos.moe/original/u_....webp"
+  "url": "https://media.byulma.run/original/u_....webp"
 }
 ```
 

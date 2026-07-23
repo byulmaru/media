@@ -68,7 +68,7 @@ describe("media API", () => {
     expect(upload.headers.get("Access-Control-Allow-Origin")).toBe("https://app.example.com");
     await expect(upload.json()).resolves.toEqual({
       id: ticket.id,
-      url: `https://media.kos.moe/original/${ticket.id}.webp`,
+      url: `https://media.byulma.run/original/${ticket.id}.webp`,
     });
 
     const duplicate = await worker.fetch(ticket.uploadUrl, {

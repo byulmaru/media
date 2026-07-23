@@ -7,7 +7,7 @@ resource "cloudflare_r2_bucket" "media" {
 resource "cloudflare_r2_custom_domain" "media" {
   account_id  = var.cloudflare_account_id
   bucket_name = cloudflare_r2_bucket.media.name
-  domain      = "media.kos.moe"
+  domain      = "media.byulma.run"
   enabled     = true
   zone_id     = var.cloudflare_zone_id
   min_tls     = "1.2"
