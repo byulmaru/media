@@ -20,6 +20,13 @@ const limits = {
 
 export const uploadRequestSchema = z.strictObject(limits);
 
+export const uploadIdParamSchema = z.strictObject({
+  id: z.string().regex(
+    /^u_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    "upload ID must be a u_-prefixed UUIDv4",
+  ),
+});
+
 export function throwOnValidationError(result: {
   success: boolean;
   error?: { issues: readonly { message: string }[] };
