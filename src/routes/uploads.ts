@@ -74,7 +74,8 @@ uploads.get(
   "/:id",
   async (c, next) => {
     if (c.req.method !== "HEAD") {
-      throw new HttpError(405, "method_not_allowed", "use HEAD to check upload completion");
+      c.header("Cache-Control", "no-store");
+      return c.body(null, 405);
     }
     await next();
   },
