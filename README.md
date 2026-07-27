@@ -107,7 +107,8 @@ Authorization: Bearer <API_KEY>
 - immutable 원본이 저장됨: `204 No Content`
 - 아직 저장되지 않음: `404 Not Found`
 - 잘못된 ID: `400 Bad Request`
-- 모든 응답: `Cache-Control: no-store`
+- 실제 GET 요청: `405 Method Not Allowed`
+- 모든 응답: `Cache-Control: no-store`, body 없음
 
 이 endpoint는 R2 binding의 object metadata만 확인하며 Account/Profile 소유권을 판단하지 않습니다.
 

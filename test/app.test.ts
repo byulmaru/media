@@ -73,6 +73,7 @@ describe("media API", () => {
     expect(await malformed.text()).toBe("");
     expect(get.status).toBe(405);
     expect(get.headers.get("Cache-Control")).toBe("no-store");
+    expect(await get.text()).toBe("");
   });
 
   it("reports completion only after the immutable original is stored", async () => {
