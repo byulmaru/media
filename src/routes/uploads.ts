@@ -69,16 +69,8 @@ uploads.post(
   },
 );
 
-// Hono dispatches HEAD through GET handlers and removes the response body.
 uploads.get(
   "/:id",
-  async (c, next) => {
-    if (c.req.method !== "HEAD") {
-      c.header("Cache-Control", "no-store");
-      return c.body(null, 405);
-    }
-    await next();
-  },
   apiKeyAuth,
   zValidator("param", uploadIdParamSchema, (result) => {
     if (!result.success) {
@@ -91,8 +83,17 @@ uploads.get(
   }),
   async (c) => {
     const { id } = c.req.valid("param");
+    const key = `original/${id}.webp`;
+    const object = await c.env.MEDIA.head(key);
     c.header("Cache-Control", "no-store");
-    return c.body(null, (await c.env.MEDIA.head(`original/${id}.webp`)) ? 204 : 404);
+    if (!object) return c.body(null, 404);
+    if (c.req.method === "HEAD") return c.body(null, 204);
+
+    const mediaType = object.httpMetadata?.contentType;
+    if (!mediaType) {
+      throw new HttpError(500, "invalid_media_metadata", "stored media has no Content-Type");
+    }
+    return c.json({ url: `${c.env.PUBLIC_BASE_URL}/${key}`, mediaType });
   },
 );
 
