@@ -52,7 +52,7 @@ describe("media API", () => {
     expect(unknown.status).toBe(400);
   });
 
-  it("authenticates and validates upload completion checks", async () => {
+  it("authenticates and validates upload completion and representation lookups", async () => {
     const id = `u_${crypto.randomUUID()}`;
     const unauthorized = await worker.fetch(`https://media.example.com/v1/uploads/${id}`, {
       method: "HEAD",
@@ -61,9 +61,7 @@ describe("media API", () => {
       method: "HEAD",
       headers: authHeaders,
     });
-    const get = await worker.fetch(`https://media.example.com/v1/uploads/${id}`, {
-      headers: authHeaders,
-    });
+    const unauthorizedGet = await worker.fetch(`https://media.example.com/v1/uploads/${id}`);
 
     expect(unauthorized.status).toBe(401);
     expect(unauthorized.headers.get("Cache-Control")).toBe("no-store");
@@ -71,9 +69,8 @@ describe("media API", () => {
     expect(malformed.status).toBe(400);
     expect(malformed.headers.get("Cache-Control")).toBe("no-store");
     expect(await malformed.text()).toBe("");
-    expect(get.status).toBe(405);
-    expect(get.headers.get("Cache-Control")).toBe("no-store");
-    expect(await get.text()).toBe("");
+    expect(unauthorizedGet.status).toBe(401);
+    expect(unauthorizedGet.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("reports completion only after the immutable original is stored", async () => {
@@ -84,6 +81,11 @@ describe("media API", () => {
     expect(pending.status).toBe(404);
     expect(pending.headers.get("Cache-Control")).toBe("no-store");
     expect(await pending.text()).toBe("");
+
+    const missingRepresentation = await worker.fetch(statusUrl, { headers: authHeaders });
+    expect(missingRepresentation.status).toBe(404);
+    expect(missingRepresentation.headers.get("Cache-Control")).toBe("no-store");
+    expect(await missingRepresentation.text()).toBe("");
 
     const failed = await worker.fetch(ticket.uploadUrl, {
       method: "PUT",
@@ -106,6 +108,14 @@ describe("media API", () => {
     expect(completed.status).toBe(204);
     expect(completed.headers.get("Cache-Control")).toBe("no-store");
     expect(await completed.text()).toBe("");
+
+    const representation = await worker.fetch(statusUrl, { headers: authHeaders });
+    expect(representation.status).toBe(200);
+    expect(representation.headers.get("Cache-Control")).toBe("no-store");
+    await expect(representation.json()).resolves.toEqual({
+      url: `https://media.byulma.run/original/${ticket.id}.webp`,
+      mediaType: "image/webp",
+    });
   });
 
   it("creates a browser upload URL and stores an immutable WebP", async () => {

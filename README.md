@@ -95,7 +95,7 @@ Content-Type: image/png
 
 검증이나 인코딩 실패는 URL을 소비하지 않습니다. 최초 R2 저장 성공 후 같은 URL을 다시 사용하면 `409`를 반환합니다.
 
-### Check upload completion
+### Check upload completion and resolve its representation
 
 Kosmo backend는 실제 소비 시점에 이미지 본문이나 공개 CDN을 거치지 않고 저장 완료를 확인합니다.
 
@@ -107,10 +107,32 @@ Authorization: Bearer <API_KEY>
 - immutable 원본이 저장됨: `204 No Content`
 - 아직 저장되지 않음: `404 Not Found`
 - 잘못된 ID: `400 Bad Request`
-- 실제 GET 요청: `405 Method Not Allowed`
 - 모든 응답: `Cache-Control: no-store`, body 없음
 
 이 endpoint는 R2 binding의 object metadata만 확인하며 Account/Profile 소유권을 판단하지 않습니다.
+
+Kosmo backend가 저장소 내부 규칙을 알지 않고 ActivityPub 표현을 만들 수 있도록, 같은 ID를
+인증된 `GET`으로 조회하면 공개 URL과 실제 저장 객체의 MIME type을 반환합니다.
+
+```http
+GET /v1/uploads/u_...
+Authorization: Bearer <API_KEY>
+```
+
+```json
+{
+  "url": "https://media.byulma.run/original/u_....webp",
+  "mediaType": "image/webp"
+}
+```
+
+- immutable 원본이 저장됨: `200 OK`
+- 아직 저장되지 않음: `404 Not Found`
+- 잘못된 ID: `400 Bad Request`
+- 모든 응답: `Cache-Control: no-store`
+
+이 endpoint 역시 소유권을 판단하지 않습니다. 호출자는 먼저 자신의 도메인 권한을 확인한 뒤
+Media Storage Service가 소유한 공개 표현 정보만 조회해야 합니다.
 
 ## Security and limits
 
