@@ -1,11 +1,15 @@
 import decodeJpeg, { init as initJpegDecode } from "@jsquash/jpeg/decode.js";
 import decodePng, { init as initPngDecode } from "@jsquash/png/decode.js";
+import resize, { initResize } from "@jsquash/resize";
 import decodeWebp, { init as initWebpDecode } from "@jsquash/webp/decode.js";
 import encodeWebp, { init as initWebpEncode } from "@jsquash/webp/encode.js";
+import { rgbaToThumbHash } from "thumbhash";
 
 import jpegDecodeWasm from "@jsquash/jpeg/codec/dec/mozjpeg_dec.wasm";
 // @ts-expect-error Wrangler exposes imported Wasm files as default WebAssembly.Module values.
 import pngWasm from "@jsquash/png/codec/pkg/squoosh_png_bg.wasm";
+// @ts-expect-error Wrangler exposes imported Wasm files as default WebAssembly.Module values.
+import resizeWasm from "@jsquash/resize/lib/resize/pkg/squoosh_resize_bg.wasm";
 import webpDecodeWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
 import webpEncodeWasm from "@jsquash/webp/codec/enc/webp_enc_simd.wasm";
 
@@ -33,6 +37,7 @@ if (!(globalThis as unknown as { ImageData?: ImageDataConstructor }).ImageData) 
 const ready = Promise.all([
   (initJpegDecode as unknown as (module: WebAssembly.Module) => Promise<void>)(jpegDecodeWasm),
   initPngDecode(pngWasm),
+  initResize(resizeWasm),
   (initWebpDecode as unknown as (module: WebAssembly.Module) => Promise<void>)(webpDecodeWasm),
   (initWebpEncode as unknown as (module: WebAssembly.Module) => Promise<void>)(webpEncodeWasm),
 ]);
@@ -75,10 +80,41 @@ async function encode(image: ImageData): Promise<ArrayBuffer> {
   }
 }
 
+export async function makeThumbHash(image: ImageData): Promise<string> {
+  await ready;
+  const scale = Math.min(1, 100 / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  try {
+    const input =
+      width === image.width && height === image.height
+        ? image
+        : await resize(image, {
+            width,
+            height,
+            method: "lanczos3",
+            fitMethod: "stretch",
+            premultiply: true,
+            linearRGB: true,
+          });
+    const hash = rgbaToThumbHash(width, height, input.data);
+    return btoa(String.fromCharCode(...hash));
+  } catch (error) {
+    throw new HttpError(
+      422,
+      "encoding_failed",
+      error instanceof Error
+        ? `ThumbHash encoding failed: ${error.message}`
+        : "ThumbHash encoding failed",
+    );
+  }
+}
+
 export async function transcodeOriginal(
   buffer: ArrayBuffer,
   format: ImageFormat,
-): Promise<{ bytes: ArrayBuffer; width: number; height: number }> {
+): Promise<{ bytes: ArrayBuffer; width: number; height: number; thumbhash: string }> {
   const image = await decode(buffer, format);
-  return { bytes: await encode(image), width: image.width, height: image.height };
+  const [bytes, thumbhash] = await Promise.all([encode(image), makeThumbHash(image)]);
+  return { bytes, width: image.width, height: image.height, thumbhash };
 }

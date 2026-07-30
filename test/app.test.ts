@@ -115,6 +115,25 @@ describe("media API", () => {
     await expect(representation.json()).resolves.toEqual({
       url: `https://media.byulma.run/original/${ticket.id}.webp`,
       mediaType: "image/webp",
+      thumbhash: expect.any(String),
+    });
+  });
+
+  it("returns a null ThumbHash for objects stored before ThumbHash metadata", async () => {
+    const id = `u_${crypto.randomUUID()}`;
+    await env.MEDIA.put(`original/${id}.webp`, PNG_1X1, {
+      httpMetadata: { contentType: "image/webp" },
+    });
+
+    const response = await worker.fetch(`https://media.example.com/v1/uploads/${id}`, {
+      headers: authHeaders,
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      url: `https://media.byulma.run/original/${id}.webp`,
+      mediaType: "image/webp",
+      thumbhash: null,
     });
   });
 
@@ -148,6 +167,7 @@ describe("media API", () => {
     expect(original).not.toBeNull();
     expect(original?.httpMetadata?.contentType).toBe("image/webp");
     expect(original?.httpMetadata?.cacheControl).toContain("immutable");
+    expect(original?.customMetadata?.thumbhash).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
     expect(inspectImage(await original!.arrayBuffer())).toMatchObject({
       format: "webp",
       width: 1,

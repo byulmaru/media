@@ -17,12 +17,18 @@ importers:
       '@jsquash/png':
         specifier: ^3.1.0
         version: 3.1.1
+      '@jsquash/resize':
+        specifier: ^2.1.1
+        version: 2.1.1
       '@jsquash/webp':
         specifier: ^1.5.0
         version: 1.5.0
       hono:
         specifier: ^4.10.8
         version: 4.12.30
+      thumbhash:
+        specifier: ^0.1.1
+        version: 0.1.1
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -439,6 +445,9 @@ packages:
   '@jsquash/png@3.1.1':
     resolution: {integrity: sha512-C10pc+0H6j0h8fENOfnGOvkXCmvpSQTDGlfGd0sHphZhPSGTyLjIrHba0FaZZdsKqA/wlmhYicUHb92vfZphaw==}
 
+  '@jsquash/resize@2.1.1':
+    resolution: {integrity: sha512-0R5UL1ZLHUT+carjVikcE1QfA+kfNQ2YamYyGVRmhfh4zttU5EY3bQBGxPIPtY2xIAw1P4Kgyxm2xrceRw1r2w==}
+
   '@jsquash/webp@1.5.0':
     resolution: {integrity: sha512-KggLoj2MnRSfIqTeKe1EmbljTX2vuV7mh79k89PCL1pyqiDULcPM1L47twxXt0hkb68F70bXiL31MxsuoZtKFw==}
 
@@ -769,6 +778,9 @@ packages:
   supports-color@10.2.2:
     resolution: {integrity: sha512-SS+jx45GF1QjgEXQx4NJZV9ImqmO2NPz5FNsIHrsDjh2YsHnawpan7SNQ1o8NuhrbHZy9AZhIoCUiCeaW/C80g==}
     engines: {node: '>=18'}
+
+  thumbhash@0.1.1:
+    resolution: {integrity: sha512-kH5pKeIIBPQXAOni2AiY/Cu/NKdkFREdpH+TLdM0g6WA7RriCv0kPLgP731ady67MhTAqrVG/4mnEeibVuCJcg==}
 
   tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
@@ -1174,6 +1186,8 @@ snapshots:
 
   '@jsquash/png@3.1.1': {}
 
+  '@jsquash/resize@2.1.1': {}
+
   '@jsquash/webp@1.5.0':
     dependencies:
       wasm-feature-detect: 1.8.0
@@ -1496,6 +1510,8 @@ snapshots:
   std-env@4.2.0: {}
 
   supports-color@10.2.2: {}
+
+  thumbhash@0.1.1: {}
 
   tinybench@2.9.0: {}
 
