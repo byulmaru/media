@@ -122,7 +122,8 @@ Authorization: Bearer <API_KEY>
 ```json
 {
   "url": "https://media.byulma.run/original/u_....webp",
-  "mediaType": "image/webp"
+  "mediaType": "image/webp",
+  "thumbhash": "1QcSHQRnh493V4dIh4eXh1h4kJUI"
 }
 ```
 
@@ -130,6 +131,9 @@ Authorization: Bearer <API_KEY>
 - 아직 저장되지 않음: `404 Not Found`
 - 잘못된 ID: `400 Bad Request`
 - 모든 응답: `Cache-Control: no-store`
+
+새 업로드는 WebP 변환에 사용한 RGBA pixels에서 ThumbHash를 함께 계산해 R2 custom metadata에
+Base64 문자열로 저장합니다. ThumbHash 도입 전에 저장된 기존 객체는 `thumbhash: null`을 반환합니다.
 
 이 endpoint 역시 소유권을 판단하지 않습니다. 호출자는 먼저 자신의 도메인 권한을 확인한 뒤
 Media Storage Service가 소유한 공개 표현 정보만 조회해야 합니다.

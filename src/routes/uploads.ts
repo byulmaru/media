@@ -93,7 +93,11 @@ uploads.get(
     if (!mediaType) {
       throw new HttpError(500, "invalid_media_metadata", "stored media has no Content-Type");
     }
-    return c.json({ url: `${c.env.PUBLIC_BASE_URL}/${key}`, mediaType });
+    return c.json({
+      url: `${c.env.PUBLIC_BASE_URL}/${key}`,
+      mediaType,
+      thumbhash: object.customMetadata?.thumbhash ?? null,
+    });
   },
 );
 
@@ -137,6 +141,7 @@ uploads.put("/:token", async (c) => {
       contentType: "image/webp",
       cacheControl: IMMUTABLE_CACHE_CONTROL,
     },
+    customMetadata: { thumbhash: output.thumbhash },
   });
   if (!stored) throw new HttpError(409, "already_uploaded", "upload URL has already been used");
   return c.json({ id: payload.id, url: `${c.env.PUBLIC_BASE_URL}/${key}` }, 201);
