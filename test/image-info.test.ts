@@ -49,7 +49,7 @@ describe("image inspection and limits", () => {
       assertImageWithinLimits(8192, 1, { maxBytes: 1024, maxDimension: 8192 }),
     ).not.toThrow();
     expect(() =>
-      assertImageWithinLimits(4096, 2048, { maxBytes: 1024, maxDimension: 8192 }),
+      assertImageWithinLimits(8192, 2048, { maxBytes: 1024, maxDimension: 8192 }),
     ).not.toThrow();
     expect(() =>
       assertImageWithinLimits(801, 600, { maxBytes: 1024, maxDimension: 800 }),
@@ -58,7 +58,7 @@ describe("image inspection and limits", () => {
       assertImageWithinLimits(8193, 1, { maxBytes: 1024, maxDimension: 8192 }),
     ).toThrowError(HttpError);
     expect(() =>
-      assertImageWithinLimits(4097, 2048, { maxBytes: 1024, maxDimension: 8192 }),
+      assertImageWithinLimits(8192, 2049, { maxBytes: 1024, maxDimension: 8192 }),
     ).toThrowError(HttpError);
   });
 });

@@ -138,7 +138,7 @@ Media Storage Service가 소유한 공개 표현 정보만 조회해야 합니�
 
 - source body: 최대 16 MiB
 - 긴 변: 최대 8192px
-- 총 pixels: 최대 8 MiPixels
+- 총 pixels: 최대 16 MiPixels
 - 지원 형식: JPEG, PNG, WebP
 - 출력: metadata가 제거된 WebP 품질 80
 - animation과 지원하지 않는 형식은 거부
