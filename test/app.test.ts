@@ -1,10 +1,11 @@
 import { env, exports } from "cloudflare:workers";
 import decodeWebp, { init as initWebpDecode } from "@jsquash/webp/decode.js";
-import encodeWebp, { init as initWebpEncode } from "@jsquash/webp/encode.js";
+import encodePng, { init as initPngEncode } from "@jsquash/png/encode.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import webpDecodeWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
-import webpEncodeWasm from "@jsquash/webp/codec/enc/webp_enc_simd.wasm";
+// @ts-expect-error Wrangler exposes imported Wasm files as default WebAssembly.Module values.
+import pngWasm from "@jsquash/png/codec/pkg/squoosh_png_bg.wasm";
 
 import { inspectImage } from "../src/image-info";
 import { DEFAULT_MAX_BYTES } from "../src/constants";
@@ -44,9 +45,7 @@ function mockedRemoteResponse(
   } as unknown as Response;
 }
 
-const avatarEncodeReady = (
-  initWebpEncode as unknown as (module: WebAssembly.Module) => Promise<void>
-)(webpEncodeWasm);
+const avatarEncodeReady = initPngEncode(pngWasm);
 
 async function createLargeAvatarFixture(): Promise<Uint8Array> {
   const width = 800;
@@ -55,19 +54,16 @@ async function createLargeAvatarFixture(): Promise<Uint8Array> {
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const offset = (y * width + x) * 4;
-      data[offset] = 240;
-      data[offset + 1] = 32;
-      data[offset + 2] = 32;
-      data[offset + 3] = x < width / 4 ? 0 : 255;
+      if (x > width / 4) {
+        data[offset] = 240;
+        data[offset + 1] = 32;
+        data[offset + 2] = 32;
+        data[offset + 3] = 255;
+      }
     }
   }
   await avatarEncodeReady;
-  const bytes = await encodeWebp(new ImageData(data, width, height), {
-    quality: 80,
-    method: 4,
-    alpha_quality: 100,
-    thread_level: 0,
-  });
+  const bytes = await encodePng(new ImageData(data, width, height));
   return new Uint8Array(bytes);
 }
 
@@ -155,8 +151,8 @@ describe("media API", () => {
     });
   });
 
-  it("shrinks a non-square remote avatar without upscaling or losing alpha", async () => {
-    const source = `https://avatars.example.com/${crypto.randomUUID()}.webp`;
+  it("shrinks a non-square remote avatar without darkening transparent edges", async () => {
+    const source = `https://avatars.example.com/${crypto.randomUUID()}.png`;
     const input = await createLargeAvatarFixture();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(mockedRemoteResponse(200, input));
 
@@ -178,7 +174,44 @@ describe("media API", () => {
     const opaquePixel = (199 * decoded.width + 399) * 4;
     expect(decoded.data[opaquePixel + 3]).toBe(255);
     expect(decoded.data[opaquePixel]).toBeGreaterThan(200);
+    const edgePixel = (100 * decoded.width + 100) * 4;
+    expect(decoded.data[edgePixel + 3]).toBe(128);
+    expect(decoded.data[edgePixel]).toBeGreaterThan(200);
   });
+
+  it.each([[8192, 17], [17, 8192]])(
+    "samples the center of a %i×%i avatar after rounding its shorter edge",
+    async (width, height) => {
+      const data = new Uint8ClampedArray(width * height * 4);
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const offset = (y * width + x) * 4;
+          const color = (height === 17 ? y : x) === 8 ? 255 : 0;
+          data.set([color, color, color, 255], offset);
+        }
+      }
+      await avatarEncodeReady;
+      const input = new Uint8Array(await encodePng(new ImageData(data, width, height)));
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(mockedRemoteResponse(200, input));
+      const response = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ url: `https://avatars.example.com/${crypto.randomUUID()}.png` }),
+      });
+      expect(response.status).toBe(201);
+      const representation = await response.json() as { url: string };
+      const stored = await env.MEDIA.get(new URL(representation.url).pathname.slice(1));
+      expect(stored).not.toBeNull();
+      await webpReady;
+      const decoded = await decodeWebp(await stored!.arrayBuffer());
+      expect(decoded).toMatchObject({
+        width: width === 17 ? 1 : 400,
+        height: height === 17 ? 1 : 400,
+      });
+      expect(decoded.data[0]).toBeGreaterThan(240);
+      expect(decoded.data[3]).toBe(255);
+    },
+  );
 
   it("sends only the minimal image request headers and never follows redirects", async () => {
     let outboundHeaders: Headers | undefined;

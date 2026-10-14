@@ -89,12 +89,12 @@ function resizeToMaxEdge(image: ImageData, maxEdge: number): ImageData {
   const source = image.data;
 
   for (let y = 0; y < height; y += 1) {
-    const sourceY = Math.min(image.height - 1, (y + 0.5) / scale - 0.5);
+    const sourceY = Math.min(image.height - 1, (y + 0.5) * image.height / height - 0.5);
     const y0 = Math.max(0, Math.floor(sourceY));
     const y1 = Math.min(image.height - 1, y0 + 1);
     const yWeight = sourceY - y0;
     for (let x = 0; x < width; x += 1) {
-      const sourceX = Math.min(image.width - 1, (x + 0.5) / scale - 0.5);
+      const sourceX = Math.min(image.width - 1, (x + 0.5) * image.width / width - 0.5);
       const x0 = Math.max(0, Math.floor(sourceX));
       const x1 = Math.min(image.width - 1, x0 + 1);
       const xWeight = sourceX - x0;
@@ -103,10 +103,19 @@ function resizeToMaxEdge(image: ImageData, maxEdge: number): ImageData {
       const topRight = (y0 * image.width + x1) * 4;
       const bottomLeft = (y1 * image.width + x0) * 4;
       const bottomRight = (y1 * image.width + x1) * 4;
-      for (let channel = 0; channel < 4; channel += 1) {
-        const top = source[topLeft + channel]! * (1 - xWeight) + source[topRight + channel]! * xWeight;
-        const bottom = source[bottomLeft + channel]! * (1 - xWeight) + source[bottomRight + channel]! * xWeight;
-        data[outputOffset + channel] = top * (1 - yWeight) + bottom * yWeight;
+      // Premultiply colors so hidden RGB cannot darken transparent edges.
+      const topLeftAlpha = source[topLeft + 3]! * (1 - xWeight) * (1 - yWeight);
+      const topRightAlpha = source[topRight + 3]! * xWeight * (1 - yWeight);
+      const bottomLeftAlpha = source[bottomLeft + 3]! * (1 - xWeight) * yWeight;
+      const bottomRightAlpha = source[bottomRight + 3]! * xWeight * yWeight;
+      const alpha = topLeftAlpha + topRightAlpha + bottomLeftAlpha + bottomRightAlpha;
+      data[outputOffset + 3] = alpha;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const color = source[topLeft + channel]! * topLeftAlpha
+          + source[topRight + channel]! * topRightAlpha
+          + source[bottomLeft + channel]! * bottomLeftAlpha
+          + source[bottomRight + channel]! * bottomRightAlpha;
+        data[outputOffset + channel] = alpha === 0 ? 0 : color / alpha;
       }
     }
   }
