@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 
 import { HttpError } from "./errors";
 import { requireConfig } from "./middleware/config";
+import { remoteAvatars } from "./routes/remote-avatars";
 import { uploads } from "./routes/uploads";
 import type { AppEnv } from "./types";
 
@@ -30,6 +31,7 @@ app.use("*", async (c, next) => {
 app.use("*", requireConfig);
 
 app.route("/v1/uploads", uploads);
+app.route("/v1/remote-avatars", remoteAvatars);
 
 app.notFound((c) => c.json({ error: { code: "not_found", message: "route not found" } }, 404));
 

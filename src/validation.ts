@@ -20,6 +20,10 @@ const limits = {
 
 export const uploadRequestSchema = z.strictObject(limits);
 
+export const remoteAvatarRequestSchema = z.strictObject({
+  url: z.string().min(1),
+});
+
 export const uploadIdParamSchema = z.strictObject({
   id: z.string().regex(
     /^u_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,

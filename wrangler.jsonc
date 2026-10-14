@@ -3,7 +3,7 @@
   "name": "byulmaru-media",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-16",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "routes": [
     {
       "pattern": "media-api.byulmaru.co",

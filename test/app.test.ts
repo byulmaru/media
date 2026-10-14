@@ -1,10 +1,13 @@
 import { env, exports } from "cloudflare:workers";
 import decodeWebp, { init as initWebpDecode } from "@jsquash/webp/decode.js";
-import { describe, expect, it } from "vitest";
+import encodeWebp, { init as initWebpEncode } from "@jsquash/webp/encode.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import webpDecodeWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
+import webpEncodeWasm from "@jsquash/webp/codec/enc/webp_enc_simd.wasm";
 
 import { inspectImage } from "../src/image-info";
+import { DEFAULT_MAX_BYTES } from "../src/constants";
 import {
   authHeaders,
   createUpload,
@@ -15,11 +18,240 @@ import {
   WEBP_RGBA_2X1,
 } from "./helpers";
 
+function mockedRemoteResponse(
+  status: number,
+  bytes: Uint8Array | null,
+  headers: Record<string, string> = {},
+): Response {
+  let read = false;
+  return {
+    status,
+    headers: new Headers(headers),
+    body: bytes
+      ? {
+          getReader: () => ({
+            read: async () => {
+              if (read) return { done: true, value: undefined };
+              read = true;
+              return { done: false, value: bytes };
+            },
+            releaseLock: () => {},
+            cancel: async () => {},
+          }),
+          cancel: async () => {},
+        }
+      : null,
+  } as unknown as Response;
+}
+
+const avatarEncodeReady = (
+  initWebpEncode as unknown as (module: WebAssembly.Module) => Promise<void>
+)(webpEncodeWasm);
+
+async function createLargeAvatarFixture(): Promise<Uint8Array> {
+  const width = 800;
+  const height = 400;
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 4;
+      data[offset] = 240;
+      data[offset + 1] = 32;
+      data[offset + 2] = 32;
+      data[offset + 3] = x < width / 4 ? 0 : 255;
+    }
+  }
+  await avatarEncodeReady;
+  const bytes = await encodeWebp(new ImageData(data, width, height), {
+    quality: 80,
+    method: 4,
+    alpha_quality: 100,
+    thread_level: 0,
+  });
+  return new Uint8Array(bytes);
+}
+
 describe("media API", () => {
   const worker = (exports as unknown as { default: Fetcher }).default;
   const webpReady = (
     initWebpDecode as unknown as (module: WebAssembly.Module) => Promise<void>
   )(webpDecodeWasm);
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("requires authentication and rejects unsafe remote URLs before fetching", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const unauthenticated = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://avatars.example.com/a.png" }),
+    });
+    expect(unauthenticated.status).toBe(401);
+
+    const unknownField = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ url: "https://avatars.example.com/a.png", extra: true }),
+    });
+    expect(unknownField.status).toBe(400);
+
+    for (const url of [
+      "http://avatars.example.com/a.png",
+      "https://127.0.0.1/a.png",
+      "https://[::1]/a.png",
+      "https://user:password@avatars.example.com/a.png",
+      "https://avatars.example.com:8443/a.png",
+      "https://avatars.local/a.png",
+      "https://avatars.localhost/a.png",
+      "https://avatars.internal/a.png",
+      "https://avatar/a.png",
+    ]) {
+      const response = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ url }),
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_url" } });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("stores a normalized remote avatar once and reuses the daily cache key", async () => {
+    const source = `https://avatars.example.com/${crypto.randomUUID()}.png?size=small#ignored`;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(mockedRemoteResponse(200, PNG_1X1));
+
+    const first = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ url: source }),
+    });
+    expect(first.status).toBe(201);
+    await expect(first.json()).resolves.toMatchObject({ mediaType: "image/webp" });
+
+    const second = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ url: source.replace("#ignored", "#different") }),
+    });
+    expect(second.status).toBe(200);
+    const representation = await second.json() as { url: string; mediaType: string };
+    expect(representation.mediaType).toBe("image/webp");
+    expect(representation.url).not.toContain(source.split("#", 1)[0]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    const objects = await env.MEDIA.list({ prefix: "remote-avatar/" });
+    const stored = objects.objects.find((object) => object.key === new URL(representation.url).pathname.slice(1));
+    expect(stored).toBeDefined();
+    const body = await env.MEDIA.get(stored!.key);
+    expect(body).not.toBeNull();
+    expect(body!.size).toBeLessThanOrEqual(512 * 1024);
+    expect(inspectImage(await body!.arrayBuffer())).toMatchObject({
+      format: "webp",
+      width: 1,
+      height: 1,
+    });
+  });
+
+  it("shrinks a non-square remote avatar without upscaling or losing alpha", async () => {
+    const source = `https://avatars.example.com/${crypto.randomUUID()}.webp`;
+    const input = await createLargeAvatarFixture();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockedRemoteResponse(200, input));
+
+    const response = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ url: source }),
+    });
+    expect(response.status).toBe(201);
+    const representation = await response.json() as { url: string };
+    const stored = await env.MEDIA.get(new URL(representation.url).pathname.slice(1));
+    expect(stored).not.toBeNull();
+    expect(stored!.size).toBeLessThanOrEqual(512 * 1024);
+
+    await webpReady;
+    const decoded = await decodeWebp(await stored!.arrayBuffer());
+    expect(decoded).toMatchObject({ width: 400, height: 200 });
+    expect(decoded.data[3]).toBe(0);
+    const opaquePixel = (199 * decoded.width + 399) * 4;
+    expect(decoded.data[opaquePixel + 3]).toBe(255);
+    expect(decoded.data[opaquePixel]).toBeGreaterThan(200);
+  });
+
+  it("sends only the minimal image request headers and never follows redirects", async () => {
+    let outboundHeaders: Headers | undefined;
+    let redirectMode: RequestRedirect | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/private.png") {
+        outboundHeaders = request.headers;
+        redirectMode = request.redirect;
+        return mockedRemoteResponse(200, PNG_1X1);
+      }
+      return mockedRemoteResponse(302, null, {
+        Location: "https://avatars.example.com/final.png",
+      });
+    });
+
+    const response = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        Cookie: "session=secret",
+        Forwarded: "for=127.0.0.1",
+      },
+      body: JSON.stringify({ url: "https://avatars.example.com/private.png" }),
+    });
+    expect(response.status).toBe(201);
+    expect(redirectMode).toBe("manual");
+    expect(outboundHeaders?.get("accept")).toBe("image/jpeg,image/png,image/webp");
+    expect(outboundHeaders?.get("authorization")).toBeNull();
+    expect(outboundHeaders?.get("cookie")).toBeNull();
+    expect(outboundHeaders?.get("forwarded")).toBeNull();
+
+    const redirect = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ url: "https://avatars.example.com/redirect.png" }),
+    });
+    expect(redirect.status).toBe(502);
+  });
+
+  it("rejects oversized bodies and bounded fetch timeouts", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/large.png") {
+        return mockedRemoteResponse(200, new Uint8Array(DEFAULT_MAX_BYTES + 1));
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          reject(new DOMException("aborted", "AbortError"));
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    });
+    const oversized = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ url: "https://avatars.example.com/large.png" }),
+    });
+    expect(oversized.status).toBe(413);
+
+    const timeout = await worker.fetch("https://media.example.com/v1/remote-avatars", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ url: "https://avatars.example.com/slow.png" }),
+    });
+    expect(timeout.status).toBe(504);
+  }, 10_000);
 
   it("requires authentication to create upload URLs", async () => {
     const upload = await worker.fetch("https://media.example.com/v1/uploads", {
