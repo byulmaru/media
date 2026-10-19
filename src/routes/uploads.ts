@@ -61,7 +61,10 @@ uploads.post(
     return c.json(
       {
         id,
-        uploadUrl: new URL(`/v1/uploads/${token}`, c.req.url).href,
+        uploadUrl: new URL(
+          `/v1/uploads/${token}`,
+          c.env.PUBLIC_API_BASE_URL ?? c.req.url,
+        ).href,
         expiresAt: new Date(expiresAt * 1000).toISOString(),
       },
       201,

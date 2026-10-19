@@ -17,6 +17,7 @@ import {
 
 describe("media API", () => {
   const worker = (exports as unknown as { default: Fetcher }).default;
+  const media = env.MEDIA as unknown as R2Bucket;
   const webpReady = (
     initWebpDecode as unknown as (module: WebAssembly.Module) => Promise<void>
   )(webpDecodeWasm);
@@ -144,7 +145,7 @@ describe("media API", () => {
     });
     expect(duplicate.status).toBe(409);
 
-    const original = await env.MEDIA.get(`original/${ticket.id}.webp`);
+    const original = await media.get(`original/${ticket.id}.webp`);
     expect(original).not.toBeNull();
     expect(original?.httpMetadata?.contentType).toBe("image/webp");
     expect(original?.httpMetadata?.cacheControl).toContain("immutable");
@@ -171,7 +172,7 @@ describe("media API", () => {
     });
 
     expect(response.status).toBe(201);
-    const original = await env.MEDIA.get(`original/${ticket.id}.webp`);
+    const original = await media.get(`original/${ticket.id}.webp`);
     expect(inspectImage(await original!.arrayBuffer())).toMatchObject({
       format: "webp",
       width: 2,
@@ -188,7 +189,7 @@ describe("media API", () => {
     });
 
     expect(response.status).toBe(201);
-    const original = await env.MEDIA.get(`original/${ticket.id}.webp`);
+    const original = await media.get(`original/${ticket.id}.webp`);
     expect(inspectImage(await original!.arrayBuffer())).toMatchObject({
       format: "webp",
       width: 1,
@@ -205,7 +206,7 @@ describe("media API", () => {
     });
 
     expect(response.status).toBe(201);
-    const original = await env.MEDIA.get(`original/${ticket.id}.webp`);
+    const original = await media.get(`original/${ticket.id}.webp`);
     await webpReady;
     const decoded = await decodeWebp(await original!.arrayBuffer());
     expect(decoded).toMatchObject({ width: 2, height: 1 });

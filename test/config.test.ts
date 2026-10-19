@@ -20,7 +20,7 @@ describe("Worker configuration", () => {
     ["invalid ALLOWED_ORIGINS", { ALLOWED_ORIGINS: "https://kos.moe/path" }],
     ["PUBLIC_BASE_URL", { PUBLIC_BASE_URL: "" }],
     ["invalid PUBLIC_BASE_URL", { PUBLIC_BASE_URL: "https://media.example.com/path" }],
-    ["MEDIA", { MEDIA: undefined as unknown as R2Bucket }],
+    ["MEDIA", { MEDIA: undefined as unknown as Env["MEDIA"] }],
   ] satisfies [string, Partial<Env>][])('fails closed when %s is missing', async (_name, patch) => {
     const response = await app.request(
       "https://media.example.com/images/u_00000000-0000-4000-8000-000000000000",
@@ -38,8 +38,9 @@ describe("Worker configuration", () => {
 describe("local R2 binding", () => {
   it("reads and writes through the isolated Miniflare binding", async () => {
     const key = `test/isolation-marker-${crypto.randomUUID()}`;
-    await env.MEDIA.put(key, "marker");
-    expect(await env.MEDIA.head(key)).not.toBeNull();
-    await env.MEDIA.delete(key);
+    const media = env.MEDIA as unknown as R2Bucket;
+    await media.put(key, "marker");
+    expect(await media.head(key)).not.toBeNull();
+    await media.delete(key);
   });
 });

@@ -3,15 +3,16 @@ import decodePng, { init as initPngDecode } from "@jsquash/png/decode.js";
 import decodeWebp, { init as initWebpDecode } from "@jsquash/webp/decode.js";
 import encodeWebp, { init as initWebpEncode } from "@jsquash/webp/encode.js";
 
-import jpegDecodeWasm from "@jsquash/jpeg/codec/dec/mozjpeg_dec.wasm";
-// @ts-expect-error Wrangler exposes imported Wasm files as default WebAssembly.Module values.
-import pngWasm from "@jsquash/png/codec/pkg/squoosh_png_bg.wasm";
-import webpDecodeWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
-import webpEncodeWasm from "@jsquash/webp/codec/enc/webp_enc_simd.wasm";
-
 import { WEBP_QUALITY } from "./constants";
 import { HttpError } from "./errors";
 import type { ImageFormat } from "./types";
+
+export interface CodecWasmModules {
+  jpegDecode: WebAssembly.Module;
+  pngDecode: WebAssembly.Module;
+  webpDecode: WebAssembly.Module;
+  webpEncode: WebAssembly.Module;
+}
 
 type ImageDataConstructor = new (
   data: Uint8ClampedArray,
@@ -30,15 +31,33 @@ if (!(globalThis as unknown as { ImageData?: ImageDataConstructor }).ImageData) 
   } as unknown as ImageDataConstructor;
 }
 
-const ready = Promise.all([
-  (initJpegDecode as unknown as (module: WebAssembly.Module) => Promise<void>)(jpegDecodeWasm),
-  initPngDecode(pngWasm),
-  (initWebpDecode as unknown as (module: WebAssembly.Module) => Promise<void>)(webpDecodeWasm),
-  (initWebpEncode as unknown as (module: WebAssembly.Module) => Promise<void>)(webpEncodeWasm),
-]);
+let ready: Promise<void> | undefined;
+
+export function initializeCodec(modules: CodecWasmModules): Promise<void> {
+  if (!ready) {
+    ready = Promise.all([
+      (initJpegDecode as unknown as (module: WebAssembly.Module) => Promise<void>)(
+        modules.jpegDecode,
+      ),
+      initPngDecode(modules.pngDecode),
+      (initWebpDecode as unknown as (module: WebAssembly.Module) => Promise<void>)(
+        modules.webpDecode,
+      ),
+      (initWebpEncode as unknown as (module: WebAssembly.Module) => Promise<void>)(
+        modules.webpEncode,
+      ),
+    ]).then(() => undefined);
+  }
+  return ready;
+}
+
+function codecReady(): Promise<void> {
+  if (!ready) throw new Error("image codec has not been initialized");
+  return ready;
+}
 
 async function decode(buffer: ArrayBuffer, format: ImageFormat): Promise<ImageData> {
-  await ready;
+  await codecReady();
   try {
     switch (format) {
       case "jpeg":
@@ -58,7 +77,7 @@ async function decode(buffer: ArrayBuffer, format: ImageFormat): Promise<ImageDa
 }
 
 async function encode(image: ImageData): Promise<ArrayBuffer> {
-  await ready;
+  await codecReady();
   try {
     return await encodeWebp(image, {
       quality: WEBP_QUALITY,

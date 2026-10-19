@@ -1,17 +1,21 @@
 # byulmaru media
 
-Cloudflare Worker가 JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 R2에 저장하는 업로드 서비스입니다. API Worker는 `https://media-api.byulmaru.co`에서 signed upload를 담당하고, 저장된 원본은 `https://media.byulma.run`에 연결된 R2 bucket에서 직접 제공합니다.
+JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 Cloudflare R2에 저장하는 업로드 서비스입니다. 같은 API를 Cloudflare Worker와 Node.js 서버로 실행할 수 있습니다. 두 런타임은 같은 R2 bucket과 `original/<id>.webp` 객체 key를 사용하므로 트래픽을 단계적으로 전환할 수 있습니다. 공개 이미지는 `https://media.byulma.run`에서 제공합니다.
 
-이미지 변환에는 Cloudflare Images 대신 Worker-compatible 단일 스레드 WASM인 jSquash를 사용합니다.
+이미지 변환에는 Cloudflare Images 대신 단일 스레드 WASM인 jSquash를 사용합니다.
 
 ## Architecture
 
 1. 인증된 Kosmo backend가 `POST /v1/uploads`를 호출합니다.
-2. Worker가 `u_<UUIDv4>` ID와 10분짜리 signed upload URL을 반환합니다.
+2. API가 `u_<UUIDv4>` ID와 10분짜리 signed upload URL을 반환합니다.
 3. 브라우저가 signed URL에 원본 이미지를 `PUT`합니다.
-4. Worker가 이미지 제한을 검증하고 WebP로 변환해 `original/<id>.webp`에 한 번만 저장합니다.
+4. API가 이미지 제한을 검증하고 WebP로 변환해 `original/<id>.webp`에 한 번만 저장합니다.
 5. 성공 응답의 `url`은 `https://media.byulma.run/original/<id>.webp`를 가리킵니다.
-6. 이미지 GET과 HEAD는 Worker를 통하지 않고 R2 custom domain으로 전달됩니다.
+6. 이미지 GET과 HEAD는 API 런타임을 통하지 않고 R2 custom domain으로 전달됩니다.
+
+Worker는 Wrangler `MEDIA` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. 두 런타임은 같은 encoder와 객체 형식, metadata를 사용합니다. 점진적으로 전환할 때는 두 런타임의 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`을 맞추고, Node의 `R2_BUCKET_NAME`은 Worker의 `MEDIA` binding과 같은 `byulmaru-media` bucket을 가리키도록 설정합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
+
+Node.js 서버는 처음에 별도 API hostname으로 열고, Worker의 기존 custom domain은 유지한 채 호출자의 API base URL을 독립적으로 바꿀 수 있습니다. 두 런타임이 같은 bucket을 사용하므로 기존 Worker hostname과 발급된 upload ticket은 유효 기간이 끝나고 요청이 빠질 때까지 유지한 뒤 전환을 마칩니다. 서버용 hostname과 ingress는 배포 환경에서 별도로 설정합니다.
 
 Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포함하지 않습니다.
 
@@ -23,7 +27,7 @@ Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포
 - `media.byulma.run` R2 custom domain
 - 공개 GET/HEAD를 위한 R2 CORS
 
-Worker 코드, `media-api.byulmaru.co` custom domain과 secret은 Wrangler가 담당합니다. secret 값을 Terraform state에 남기지 않기 위한 경계입니다.
+Worker 코드, `media-api.byulmaru.co` custom domain과 Worker secret은 Wrangler가 담당합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. R2 S3 access key는 서버의 secret store에 보관하고 이미지로 복사하지 않습니다.
 
 Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 실행합니다. Pull request에서는 plan만 만들고, `main` push와 수동 실행에서는 새 saved plan을 생성해 그대로 적용합니다. State는 `byulmaru-terraform-state` S3 bucket의 `media/terraform.tfstate` key를 사용합니다.
 
@@ -55,6 +59,36 @@ pnpm exec wrangler secret put UPLOAD_SIGNING_SECRET
 ```
 
 단일 Worker는 `https://kos.moe`, `https://dev.kos.moe`, `http://localhost:5173`, `http://localhost:5174`의 브라우저 PUT을 허용합니다. 로컬 개발에서는 `.dev.vars`에 `API_KEY`와 32바이트 이상의 `UPLOAD_SIGNING_SECRET`을 넣고 `pnpm dev`를 실행합니다.
+
+## Node.js server
+
+Node.js 24 서버는 같은 HTTP API와 R2 bucket을 사용합니다. R2 S3 API endpoint, bucket name, API secrets를 실행 환경 변수로 전달합니다.
+
+```sh
+pnpm build:server
+pnpm start:server
+```
+
+필수 환경 변수:
+
+- `API_KEY`
+- `UPLOAD_SIGNING_SECRET`
+- `ALLOWED_ORIGINS`
+- `PUBLIC_BASE_URL`
+- `R2_ENDPOINT`: Cloudflare account의 R2 S3 API endpoint
+- `R2_BUCKET_NAME`: 기존 Worker와 같은 `byulmaru-media` bucket
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `PUBLIC_API_BASE_URL`: 클라이언트가 호출하는 서버의 HTTPS public API origin. 별도 hostname으로 공존하는 동안에는 그 hostname을 사용하고, 기존 `media-api.byulmaru.co`는 ingress 전환 후에 사용합니다.
+
+`PUBLIC_API_BASE_URL`은 Node가 signed upload URL에 넣는 외부 API origin입니다. reverse proxy의 내부 주소가 아니라 클라이언트가 호출하는 HTTPS public origin을 사용합니다. Worker는 이 변수를 사용하지 않고 요청 URL을 사용합니다. S3 region은 `auto`로 고정합니다. R2 S3 access key는 이 bucket에 대한 읽기와 쓰기만 허용하도록 만들고 실행 환경의 secret store에 보관합니다. `PORT`는 선택 사항이며 기본값은 `3000`입니다. 서버는 `0.0.0.0`에서 listen합니다.
+
+Production image를 로컬에서 빌드하고 실행할 수 있습니다. `/path/to/runtime.env`는 위 환경 변수의 실제 값을 담은 실행 환경 파일입니다.
+
+```sh
+docker build -t byulmaru-media .
+docker run --rm -p 3000:3000 --env-file /path/to/runtime.env byulmaru-media
+```
 
 ## API
 
