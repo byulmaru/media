@@ -2,6 +2,7 @@ import {
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
+  S3ServiceException,
 } from "@aws-sdk/client-s3";
 
 import type { MediaObject, MediaPutOptions, MediaStorage } from "../storage";
@@ -11,11 +12,6 @@ export interface R2S3StorageConfig {
   bucketName: string;
   accessKeyId: string;
   secretAccessKey: string;
-}
-
-function statusCode(error: unknown): number | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
-  return (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
 }
 
 export class R2S3MediaStorage implements MediaStorage {
@@ -33,7 +29,9 @@ export class R2S3MediaStorage implements MediaStorage {
         httpMetadata: { contentType: object.ContentType },
       };
     } catch (error) {
-      if (statusCode(error) === 404) return null;
+      if (error instanceof S3ServiceException && error.$metadata.httpStatusCode === 404) {
+        return null;
+      }
       throw error;
     }
   }
@@ -61,7 +59,9 @@ export class R2S3MediaStorage implements MediaStorage {
       );
       return {};
     } catch (error) {
-      if (statusCode(error) === 412) return null;
+      if (error instanceof S3ServiceException && error.$metadata.httpStatusCode === 412) {
+        return null;
+      }
       throw error;
     }
   }

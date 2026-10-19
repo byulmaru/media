@@ -4,7 +4,7 @@ import { request as httpRequest } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { test } from "node:test";
 
-import { HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { HeadObjectCommand, PutObjectCommand, S3ServiceException } from "@aws-sdk/client-s3";
 import { R2S3MediaStorage, startServer } from "../dist/server.js";
 
 const PNG_1X1 = Buffer.from(
@@ -33,7 +33,9 @@ const putOptions = {
 };
 
 function s3Failure(status) {
-  return Object.assign(new Error(`fake S3 status ${status}`), {
+  return new S3ServiceException({
+    name: `S3 ${status}`,
+    $fault: status < 500 ? "client" : "server",
     $metadata: { httpStatusCode: status },
   });
 }
@@ -43,8 +45,18 @@ test("Node startup validates required config, port, and R2 endpoint", async () =
     startServer({ ...appEnv, API_KEY: "" }),
     /API_KEY is required/,
   );
+  const shortSigningSecret = "never-log-this-short-secret";
+  await assert.rejects(
+    startServer({ ...appEnv, UPLOAD_SIGNING_SECRET: shortSigningSecret }),
+    (error) => error.message === "service configuration is incomplete" &&
+      !error.message.includes(shortSigningSecret),
+  );
   await assert.rejects(
     startServer({ ...appEnv, PORT: "0" }),
+    /PORT must be an integer between 1 and 65535/,
+  );
+  await assert.rejects(
+    startServer({ ...appEnv, PORT: "1e3" }),
     /PORT must be an integer between 1 and 65535/,
   );
   await assert.rejects(
@@ -53,6 +65,21 @@ test("Node startup validates required config, port, and R2 endpoint", async () =
   );
   await assert.rejects(
     startServer({ ...appEnv, PUBLIC_API_BASE_URL: "https://external-api.example.com/path" }),
+    /service configuration is incomplete/,
+  );
+  for (const PUBLIC_API_BASE_URL of [
+    "http://external-api.example.com",
+    "http://10.0.0.8",
+    "http://service.localhost",
+    " https://external-api.example.com ",
+  ]) {
+    await assert.rejects(
+      startServer({ ...appEnv, PUBLIC_API_BASE_URL }),
+      /service configuration is incomplete/,
+    );
+  }
+  await assert.rejects(
+    startServer({ ...appEnv, ALLOWED_ORIGINS: "https://app.example.com/path" }),
     /service configuration is incomplete/,
   );
 });
@@ -88,6 +115,17 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
     );
     await assert.rejects(failedStorage.head("original/u_error.webp"), new RegExp(`${status}`));
   }
+  const untypedHeadFailure = Object.assign(new Error("untyped S3 status 404"), {
+    $metadata: { httpStatusCode: 404 },
+  });
+  const untypedHeadStorage = new R2S3MediaStorage(
+    { async send() { throw untypedHeadFailure; } },
+    "byulmaru-media",
+  );
+  await assert.rejects(
+    untypedHeadStorage.head("original/u_untyped.webp"),
+    (error) => error === untypedHeadFailure,
+  );
 
   const commands = [];
   const putStorage = new R2S3MediaStorage(
@@ -121,7 +159,18 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
   );
   await assert.rejects(
     failedPutStorage.put("original/u_error.webp", bytes, putOptions),
-    /fake S3 status 500/,
+    (error) => error instanceof S3ServiceException && error.$metadata.httpStatusCode === 500,
+  );
+  const untypedPutFailure = Object.assign(new Error("untyped S3 status 412"), {
+    $metadata: { httpStatusCode: 412 },
+  });
+  const untypedPutStorage = new R2S3MediaStorage(
+    { async send() { throw untypedPutFailure; } },
+    "byulmaru-media",
+  );
+  await assert.rejects(
+    untypedPutStorage.put("original/u_untyped.webp", bytes, putOptions),
+    (error) => error === untypedPutFailure,
   );
 
 });
@@ -206,6 +255,17 @@ test("built Node server converts a PNG over HTTP and preserves upload semantics"
     assert.equal(new URL(ticket.uploadUrl).origin, appEnv.PUBLIC_API_BASE_URL);
 
     const uploadPath = new URL(ticket.uploadUrl).pathname;
+    const blocked = await sendHttp(address.port, uploadPath, {
+      method: "PUT",
+      headers: {
+        Host: "internal.example",
+        Origin: "https://evil.example.com",
+        "Content-Type": "image/png",
+      },
+      body: PNG_1X1,
+    });
+    assert.equal(blocked.statusCode, 403);
+
     const uploaded = await sendHttp(address.port, uploadPath, {
       method: "PUT",
       headers: {
@@ -247,5 +307,40 @@ test("built Node server converts a PNG over HTTP and preserves upload semantics"
     });
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("built Node server accepts explicit loopback HTTP public API origins", async () => {
+  for (const PUBLIC_API_BASE_URL of [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://[::1]:3000",
+  ]) {
+    const port = await findAvailablePort();
+    const server = await startServer(
+      { ...appEnv, PORT: String(port), PUBLIC_API_BASE_URL },
+      new MemoryMediaStorage(),
+    );
+    try {
+      await once(server, "listening");
+      const address = server.address();
+      assert(address && typeof address === "object");
+      const created = await sendHttp(address.port, "/v1/uploads", {
+        method: "POST",
+        headers: {
+          Host: "internal.example",
+          "x-forwarded-host": "spoofed.example",
+          "x-forwarded-proto": "http",
+          Authorization: "Bearer test-api-key",
+          "Content-Type": "application/json",
+        },
+        body: Buffer.from("{}"),
+      });
+      assert.equal(created.statusCode, 201);
+      const ticket = JSON.parse(created.body.toString("utf8"));
+      assert.equal(new URL(ticket.uploadUrl).origin, PUBLIC_API_BASE_URL);
+    } finally {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   }
 });

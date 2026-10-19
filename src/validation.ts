@@ -2,6 +2,78 @@ import { z } from "zod";
 
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_DIMENSION } from "./constants";
 import { HttpError } from "./errors";
+import type { MediaStorage } from "./storage";
+
+// Zod's z.url() trims successful output, so exact raw-origin checks need a precheck.
+const untrimmedUrlSchema = z.string().refine((value) => value === value.trim());
+
+const exactOriginSchema = untrimmedUrlSchema
+  .pipe(z.url())
+  .pipe(z.string().refine((value) => new URL(value).origin === value));
+
+const allowedOriginsSchema = z.string().refine((value) => {
+  const origins = value.split(",").map((origin) => origin.trim()).filter(Boolean);
+  return origins.length > 0 && origins.every((origin) => exactOriginSchema.safeParse(origin).success);
+});
+
+const publicApiBaseUrlSchema = untrimmedUrlSchema
+  .pipe(z.url({ protocol: /^https?$/ }))
+  .pipe(z.string().refine((value) => {
+    const url = new URL(value);
+    return url.origin === value && (
+      url.protocol === "https:" || ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    );
+  }));
+
+const r2EndpointSchema = z
+  .url({ protocol: /^https$/ })
+  .pipe(z.string().refine((value) => {
+    const endpoint = new URL(value);
+    return endpoint.username === "" &&
+      endpoint.password === "" &&
+      endpoint.pathname === "/" &&
+      endpoint.search === "" &&
+      endpoint.hash === "";
+  }))
+  .transform((value) => new URL(value).origin);
+
+const mediaStorageSchema = z.custom<MediaStorage>((value) =>
+  value !== null &&
+  typeof value === "object" &&
+  typeof Reflect.get(value, "head") === "function" &&
+  typeof Reflect.get(value, "put") === "function",
+);
+
+export const runtimeConfigSchema = z.object({
+  API_KEY: z.string().min(1),
+  UPLOAD_SIGNING_SECRET: z.string().min(32),
+  ALLOWED_ORIGINS: allowedOriginsSchema,
+  PUBLIC_BASE_URL: exactOriginSchema,
+  PUBLIC_API_BASE_URL: publicApiBaseUrlSchema.optional(),
+  MEDIA: mediaStorageSchema,
+});
+
+const nonWhitespaceNodeValueSchema = z.string().refine((value) => value.trim().length > 0);
+
+const digitsOnlyPortSchema = z
+  .string()
+  .regex(/^\d+$/)
+  .default("3000")
+  .transform(Number)
+  .pipe(z.number().int().min(1).max(65535));
+
+export const nodeServerConfigSchema = z.object({
+  API_KEY: nonWhitespaceNodeValueSchema,
+  UPLOAD_SIGNING_SECRET: nonWhitespaceNodeValueSchema.pipe(z.string().min(32)),
+  ALLOWED_ORIGINS: nonWhitespaceNodeValueSchema.pipe(allowedOriginsSchema),
+  PUBLIC_BASE_URL: nonWhitespaceNodeValueSchema.pipe(exactOriginSchema),
+  PUBLIC_API_BASE_URL: nonWhitespaceNodeValueSchema.pipe(publicApiBaseUrlSchema),
+  PORT: digitsOnlyPortSchema,
+  R2_ENDPOINT: nonWhitespaceNodeValueSchema.pipe(r2EndpointSchema),
+  R2_BUCKET_NAME: nonWhitespaceNodeValueSchema,
+  AWS_ACCESS_KEY_ID: nonWhitespaceNodeValueSchema,
+  AWS_SECRET_ACCESS_KEY: nonWhitespaceNodeValueSchema,
+});
 
 const limits = {
   maxBytes: z
