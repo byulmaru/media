@@ -1,9 +1,12 @@
+import type { MediaStorage } from "./storage";
+
 export interface Env {
-  MEDIA: R2Bucket;
+  MEDIA: MediaStorage;
   API_KEY: string;
   UPLOAD_SIGNING_SECRET: string;
   ALLOWED_ORIGINS: string;
   PUBLIC_BASE_URL: string;
+  PUBLIC_API_BASE_URL?: string;
 }
 
 export type AppEnv = { Bindings: Env };

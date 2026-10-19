@@ -1,37 +1,16 @@
 import { createMiddleware } from "hono/factory";
 
 import { HttpError } from "../errors";
-import type { AppEnv } from "../types";
+import type { AppEnv, Env } from "../types";
+import { runtimeConfigSchema } from "../validation";
 
-export const requireConfig = createMiddleware<AppEnv>(async (c, next) => {
-  const origins = c.env.ALLOWED_ORIGINS?.split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-  const validOrigins = origins?.every((origin) => {
-    try {
-      return new URL(origin).origin === origin;
-    } catch {
-      return false;
-    }
-  });
-  let validPublicBaseUrl = false;
-  try {
-    validPublicBaseUrl =
-      new URL(c.env.PUBLIC_BASE_URL).origin === c.env.PUBLIC_BASE_URL;
-  } catch {
-    // Handled by the fail-closed check below.
-  }
-  if (
-    !c.env.API_KEY ||
-    !c.env.UPLOAD_SIGNING_SECRET ||
-    c.env.UPLOAD_SIGNING_SECRET.length < 32 ||
-    !validOrigins ||
-    origins.length === 0 ||
-    !validPublicBaseUrl ||
-    typeof c.env.MEDIA?.head !== "function" ||
-    typeof c.env.MEDIA?.put !== "function"
-  ) {
+export function assertConfig(env: Env): void {
+  if (!runtimeConfigSchema.safeParse(env).success) {
     throw new HttpError(500, "configuration_error", "service configuration is incomplete");
   }
+}
+
+export const requireConfig = createMiddleware<AppEnv>(async (c, next) => {
+  assertConfig(c.env);
   await next();
 });

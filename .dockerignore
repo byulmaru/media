@@ -1,0 +1,12 @@
+.git
+.pnpm-store
+.wrangler
+node_modules
+coverage
+dist
+terraform
+test
+.dev.vars*
+.env*
+*.env
+*.log
