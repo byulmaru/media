@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -28,3 +32,24 @@ jobs:
       - run: terraform -chdir=terraform init -backend=false
       - run: pnpm infra:fmt
       - run: pnpm infra:validate
+
+  publish:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Build and push image
+        env:
+          IMAGE_NAME: ghcr.io/byulmaru/media
+        run: |
+          docker build --tag "$IMAGE_NAME:latest" --tag "$IMAGE_NAME:$GITHUB_SHA" .
+          docker push "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:$GITHUB_SHA"

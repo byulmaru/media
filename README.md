@@ -90,6 +90,15 @@ docker build -t byulmaru-media .
 docker run --rm -p 3000:3000 --env-file /path/to/runtime.env byulmaru-media
 ```
 
+`main` 검증이 성공하면 GitHub Actions가 `ghcr.io/byulmaru/media:latest`를 게시합니다. 같은 이미지는 전체 source commit SHA 태그로도 게시되므로 특정 빌드를 선택할 수 있습니다.
+
+GHCR package가 private이면 pull 전에 읽기 권한이 있는 계정으로 `docker login ghcr.io`를 실행해야 합니다.
+
+```sh
+docker pull ghcr.io/byulmaru/media:latest
+docker run --rm -p 3000:3000 --env-file /path/to/runtime.env ghcr.io/byulmaru/media:latest
+```
+
 ## API
 
 ### Create a browser upload
