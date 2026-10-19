@@ -36,6 +36,7 @@ Repository variables:
 - `AWS_ROLE_ARN`: state bucket에 접근할 GitHub Actions OIDC role
 - `CLOUDFLARE_ACCOUNT_ID`: media 리소스를 소유할 Cloudflare account ID
 - `CLOUDFLARE_ZONE_ID`: `byulma.run` Cloudflare zone ID
+- `TAILSCALE_OAUTH_CLIENT_ID`, `TAILSCALE_AUDIENCE`: GitHub Actions가 private Argo CD에 접근할 Tailscale workload identity 값. Media repository의 GitHub OIDC identity도 Tailscale 외부 workload identity 정책에서 허용해야 합니다.
 
 Repository secrets:
 
@@ -90,9 +91,7 @@ docker build -t byulmaru-media .
 docker run --rm -p 3000:3000 --env-file /path/to/runtime.env byulmaru-media
 ```
 
-`main` 검증이 성공하면 GitHub Actions가 `ghcr.io/byulmaru/media:latest`를 게시합니다. 같은 이미지는 전체 source commit SHA 태그로도 게시되므로 특정 빌드를 선택할 수 있습니다.
-
-GHCR package가 private이면 pull 전에 읽기 권한이 있는 계정으로 `docker login ghcr.io`를 실행해야 합니다.
+`main`의 검증과 네이티브 ARM64 이미지 빌드가 성공하면 GitHub Actions가 `ghcr.io/byulmaru/media:latest`와 전체 source commit SHA 태그를 게시합니다. GHCR package는 공개입니다.
 
 ```sh
 docker pull ghcr.io/byulmaru/media:latest
@@ -199,3 +198,12 @@ pnpm dry-run
 pnpm infra:fmt
 pnpm infra:validate
 ```
+
+## Kubernetes 배포 (Argo CD)
+
+1. 위 Tailscale 변수와 외부 workload identity 정책을 준비한 뒤 Kubernetes repository의 Terraform 변경을 적용해 Media GitHub OIDC identity에 Argo CD `media` project 접근 권한을 줍니다. 이어서 이 repository의 Terraform을 적용해 `helm/` chart를 `media` namespace에 배포하는 `media` Application을 만듭니다. 처음에는 자동 동기화가 꺼져 있습니다.
+2. Cluster에는 Vault Secrets Operator와 `vso-kubernetes-sync` Kubernetes auth role이 필요합니다. KV v2의 `secret/kubernetes/media`에 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`를 저장하고, Worker와 공존하는 동안 첫 두 값은 Worker와 맞춥니다. R2 key는 Helm values에 넣지 않습니다.
+3. Chart의 기본 API host는 임시 주소 `media-api-k8s.byulmaru.co`이며 `host` 값이 HTTPRoute hostname과 `PUBLIC_API_BASE_URL`을 함께 정합니다. HTTPRoute는 `gateway/public` Gateway를 사용합니다. Cloudflare에 이 host의 proxied A record를 public Gateway EIP (`aws_eip.public_gateway_nlb.public_ip` in Kubernetes Terraform)로 한 번 추가해야 합니다. 이 repository는 DNS를 관리하지 않으며 공개 이미지 URL `media.byulma.run`은 그대로 사용합니다.
+4. Main CI는 검증 후 네이티브 ARM64 runner에서 image를 빌드하고 게시합니다. Terraform이 처음 만든 Application은 수동 동기화 상태이며, 첫 성공한 ARM64 게시 후 CI가 source SHA, `version`, `imageDigest`를 함께 설정하고 자동 동기화, prune, self-heal을 켭니다. Chart의 기본 image reference는 기존 AMD64 seed이므로 첫 게시 전에는 수동 sync하지 마세요. CI는 Application의 목표 SHA/version/digest와 관찰된 sync SHA가 맞고 sync가 `Synced`, health가 `Healthy`일 때 성공합니다.
+5. Workload는 포트 3000에서 실행되고 영속 볼륨 없이 기존 R2 bucket을 사용합니다. TCP startup probe와 Gateway request timeout은 최대 120초를 허용합니다. CPU 100m / memory 256Mi 요청과 CPU 1 / memory 1Gi 제한은 측정 전 초기값이며, 서버는 SIGTERM 때 요청을 drain하지 않아 pod 교체가 진행 중 업로드를 끊을 수 있습니다.
+6. 먼저 호출자의 API base URL을 임시 host로 바꿔 기존 Worker가 새 ticket을 발급하지 않도록 합니다. 이미 발급한 최대 10분 ticket과 진행 중 업로드를 처리하도록 `media-api.byulmaru.co`의 Worker를 계속 유지하고, 모두 끝난 뒤 기존 host를 EKS ingress로 전환합니다. 공개 이미지 hostname은 계속 `media.byulma.run`입니다.
