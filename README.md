@@ -98,9 +98,9 @@ media Workflow는 Hope queue에 변환 Activity를 예약합니다. Activity는 
 - `byulmaru-media` R2 bucket
 - `media.byulma.run` R2 custom domain
 - 공개 GET/HEAD를 위한 R2 CORS
-- 비공개 `byulmaru-media-staging` R2 bucket. `uploads/` object는 48시간 lifecycle 만료를 backstop으로 사용하고, 미완료 multipart upload는 24시간 뒤 abort합니다.
+- `byulmaru-media-staging` private R2 bucket. Nexus workflow는 게시를 기다리고, 게시 시 staging 객체를 정리합니다. 미게시 원본은 `LastModified` 후 24시간에 정리합니다. R2 lifecycle은 workflow 중단 시 남은 `uploads/` 객체를 48시간 age threshold 이후 정리하는 backstop입니다. Cloudflare는 lifecycle 만료 뒤 보통 24시간 이내에 object를 삭제하지만, 이는 보장된 최대 지연 시간이 아닙니다. 미완료 multipart upload는 24시간 age threshold에 중단됩니다.
 
-Staging bucket에는 custom domain, public CORS, `r2.dev` URL을 설정하지 않습니다. Workflow의 게시 기한은 원본 object의 `LastModified`부터 24시간입니다. Lifecycle 만료는 남은 object를 정리하는 backstop입니다. Cloudflare는 만료 뒤 보통 24시간 이내에 object를 삭제하지만, 이는 보장된 최대 지연 시간이 아닙니다.
+Staging bucket에는 custom domain, public CORS, `r2.dev` URL을 설정하지 않습니다.
 
 Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. R2 S3 access key는 서버의 secret store에 보관하고 이미지로 복사하지 않습니다. Staging key는 비공개 bucket의 object read/write만 허용합니다.
 
