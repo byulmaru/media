@@ -26,6 +26,7 @@ Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포
 - `byulmaru-media` R2 bucket
 - `media.byulma.run` R2 custom domain
 - 공개 GET/HEAD를 위한 R2 CORS
+- `byulmaru-media-staging` private R2 bucket. Nexus workflow는 게시를 기다리며, 게시 시 staging 객체를 정리하거나 미게시 객체를 `LastModified` 후 24시간에 정리합니다. R2 lifecycle은 workflow 중단 시 남은 `uploads/` 객체를 48시간 age threshold 이후 정리하는 backstop이고, 실제 삭제는 Cloudflare 처리 지연으로 늦어질 수 있습니다. 미완료 multipart upload는 24시간 age threshold에 중단됩니다.
 
 Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. R2 S3 access key는 서버의 secret store에 보관하고 이미지로 복사하지 않습니다.
 

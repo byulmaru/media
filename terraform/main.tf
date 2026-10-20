@@ -45,6 +45,12 @@ resource "cloudflare_r2_bucket_lifecycle" "media_staging" {
     delete_objects_transition = {
       condition = {
         type    = "Age"
+        max_age = 172800
+      }
+    }
+    abort_multipart_uploads_transition = {
+      condition = {
+        type    = "Age"
         max_age = 86400
       }
     }
