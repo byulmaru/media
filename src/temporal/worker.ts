@@ -43,7 +43,7 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
       },
       activities: createUploadProcessingActivities(staging, media, config.PUBLIC_BASE_URL),
       nexusServices: [mediaServiceHandler],
-      maxConcurrentActivityTaskExecutions: 1,
+      maxConcurrentActivityTaskExecutions: 4,
     });
     await worker.run();
   } finally {

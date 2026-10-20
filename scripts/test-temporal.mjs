@@ -86,6 +86,7 @@ class MemoryStagingStorage {
   contentReads = new Map();
   deleteKeys = [];
   failDeleteKey;
+  getGate;
 
   seed(key, bytes, lastModified = new Date()) {
     this.objects.set(key, { bytes: Uint8Array.from(bytes), lastModified });
@@ -102,6 +103,10 @@ class MemoryStagingStorage {
     const object = this.objects.get(key);
     if (!object) throw new Error("missing staged upload");
     if (object.bytes.byteLength > maxBytes) throw new RangeError("staging object exceeds maxBytes");
+    if (this.getGate?.key === key) {
+      this.getGate.started();
+      await this.getGate.promise;
+    }
     return object.bytes.slice().buffer;
   }
 
@@ -204,7 +209,7 @@ async function startWorker(environment, workflowBundle, staging, media, failures
     workflowBundle: { code: workflowBundle.code },
     activities: createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL),
     nexusServices: [mediaServiceHandler],
-    maxConcurrentActivityTaskExecutions: 1,
+    maxConcurrentActivityTaskExecutions: 4,
   });
   const run = worker.run().catch((error) => { failures.push(error); });
   return { worker, run };
@@ -322,6 +327,72 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     );
     assert.match(missingPublishResult.error, /upload workflow was not found/i);
     assert.equal(staging.lastModifiedReads.size, 0);
+
+    const blocked = newUpload();
+    const concurrent = newUpload();
+    staging.seed(blocked.sourceKey, PNG_1X1);
+    staging.seed(concurrent.sourceKey, PNG_1X1);
+    let releaseBlockedGet;
+    let announceBlockedGet;
+    const blockedGetStarted = new Promise((resolve) => { announceBlockedGet = resolve; });
+    const blockedGet = new Promise((resolve) => { releaseBlockedGet = resolve; });
+    staging.getGate = {
+      key: blocked.sourceKey,
+      started: announceBlockedGet,
+      promise: blockedGet,
+    };
+    let blockedResultPromise;
+    let blockedCompleted = false;
+    try {
+      const blockedCaller = await startCaller(
+        environment,
+        endpointName,
+        uploadInput(blocked.id, blocked.sourceKey),
+        `blocked-caller:${randomUUID()}`,
+      );
+      await awaitUploadWorkflowWaiting(environment, staging, blocked.id, blocked.sourceKey);
+      await blockedCaller.signal("finishNexusUploadTest");
+      blockedResultPromise = blockedCaller.result().then((result) => {
+        blockedCompleted = true;
+        assert.equal(result.upload?.id, blocked.id);
+        assert.equal(result.error, undefined);
+      });
+      await withTimeout(blockedGetStarted, WORKFLOW_TIMEOUT_MS, "first upload did not start processing");
+
+      const concurrentCaller = await startCaller(
+        environment,
+        endpointName,
+        uploadInput(concurrent.id, concurrent.sourceKey),
+        `concurrent-caller:${randomUUID()}`,
+      );
+      await awaitUploadWorkflowWaiting(environment, staging, concurrent.id, concurrent.sourceKey);
+      await concurrentCaller.signal("finishNexusUploadTest");
+      const concurrentResult = await withTimeout(
+        concurrentCaller.result(),
+        WORKFLOW_TIMEOUT_MS,
+        "second upload did not complete while first processing was blocked",
+      );
+      const concurrentOutputKey = `original/${concurrent.id}.webp`;
+      assert.equal(concurrentResult.upload?.id, concurrent.id);
+      assert.equal(concurrentResult.error, undefined);
+      assert.equal(blockedCompleted, false);
+      assert.equal(staging.objects.has(blocked.sourceKey), true);
+      assert.equal(staging.deleteKeys.includes(blocked.sourceKey), false);
+      assert.equal(staging.contentReads.get(concurrent.sourceKey), 1);
+      assert.equal(staging.objects.has(concurrent.sourceKey), false);
+      assert.equal(staging.deleteKeys.includes(concurrent.sourceKey), true);
+      assert.equal(media.putCounts.get(concurrentOutputKey), 1);
+    } finally {
+      releaseBlockedGet();
+      staging.getGate = undefined;
+    }
+    await withTimeout(
+      blockedResultPromise,
+      WORKFLOW_TIMEOUT_MS,
+      "first upload did not complete after processing was released",
+    );
+    assert.equal(staging.objects.has(blocked.sourceKey), false);
+    assert.equal(staging.deleteKeys.includes(blocked.sourceKey), true);
 
     const successful = newUpload();
     const successfulInput = uploadInput(successful.id, successful.sourceKey);
