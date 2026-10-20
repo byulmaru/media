@@ -1,7 +1,12 @@
 name: Deploy
 
 on:
-  workflow_call:
+  push:
+    branches: [main]
+
+concurrency:
+  group: media-deploy-main
+  cancel-in-progress: true
 
 permissions:
   contents: read

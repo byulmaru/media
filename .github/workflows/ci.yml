@@ -2,8 +2,6 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -37,18 +35,3 @@ jobs:
       - run: terraform -chdir=terraform init -backend=false
       - run: pnpm infra:fmt
       - run: pnpm infra:validate
-
-  build:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: docker build --tag byulmaru-media:ci .
-
-  deploy:
-    needs: [validate, build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    uses: ./.github/workflows/deploy.yml
