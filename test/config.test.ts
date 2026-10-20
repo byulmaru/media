@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { app } from "../src/app";
 import type { Env } from "../src/types";
+import { temporalUploadConfigSchema } from "../src/validation";
 import { authHeaders } from "./helpers";
 
 const completeEnv: Env = {
@@ -55,6 +56,39 @@ describe("Worker configuration", () => {
     expect(response.status).toBe(201);
     const ticket = await response.json() as { uploadUrl: string };
     expect(new URL(ticket.uploadUrl).origin).toBe(PUBLIC_API_BASE_URL);
+  });
+});
+
+describe("Temporal upload configuration", () => {
+  const config = {
+    TEMPORAL_ADDRESS: "temporal-frontend.temporal.svc.cluster.local:7233",
+    TEMPORAL_NAMESPACE: "media",
+    TEMPORAL_TASK_QUEUE: "media-uploads",
+    PUBLIC_BASE_URL: "https://media.example.com",
+    R2_ENDPOINT: "https://account.r2.cloudflarestorage.com",
+    R2_BUCKET_NAME: "byulmaru-media",
+    AWS_ACCESS_KEY_ID: "media-access-key",
+    AWS_SECRET_ACCESS_KEY: "media-secret-key",
+    R2_STAGING_BUCKET_NAME: "byulmaru-media-staging",
+    R2_STAGING_ACCESS_KEY_ID: "staging-access-key",
+    R2_STAGING_SECRET_ACCESS_KEY: "staging-secret-key",
+  };
+
+  it("accepts complete nonblank config and keeps staging private from the public bucket", () => {
+    expect(temporalUploadConfigSchema.safeParse(config).success).toBe(true);
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      R2_STAGING_BUCKET_NAME: config.R2_BUCKET_NAME,
+    }).success).toBe(false);
+  });
+
+  it.each([
+    ["Temporal address", { TEMPORAL_ADDRESS: " " }],
+    ["staging access key", { R2_STAGING_ACCESS_KEY_ID: "" }],
+    ["staging secret", { R2_STAGING_SECRET_ACCESS_KEY: " " }],
+    ["R2 endpoint", { R2_ENDPOINT: "https://account.r2.example.com/path" }],
+  ])("rejects missing or invalid %s", (_name, patch) => {
+    expect(temporalUploadConfigSchema.safeParse({ ...config, ...patch }).success).toBe(false);
   });
 });
 

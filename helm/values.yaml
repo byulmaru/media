@@ -10,6 +10,13 @@ config:
   publicBaseUrl: https://media.byulma.run
   r2BucketName: byulmaru-media
   r2Endpoint: https://676a2d8e52515abd22c0edda7364cf73.r2.cloudflarestorage.com
+  r2StagingBucketName: byulmaru-media-staging
+
+temporal:
+  address: temporal-frontend.temporal.svc.cluster.local:7233
+  namespace: media
+  taskQueue: media-upload
+  adminToolsImage: temporalio/admin-tools@sha256:dbc5fcd6ee8f0f4d808bf765af9a87dea9d8a283abfdcfbd2fc148496ba66107
 
 resources:
   requests:

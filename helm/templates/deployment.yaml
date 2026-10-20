@@ -48,9 +48,26 @@ spec:
               value: {{ .Values.config.r2BucketName | quote }}
             - name: R2_ENDPOINT
               value: {{ .Values.config.r2Endpoint | quote }}
-          envFrom:
-            - secretRef:
-                name: env
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: API_KEY
+            - name: UPLOAD_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: UPLOAD_SIGNING_SECRET
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: AWS_SECRET_ACCESS_KEY
           startupProbe:
             tcpSocket:
               port: http

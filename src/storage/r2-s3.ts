@@ -3,7 +3,9 @@ import {
   PutObjectCommand,
   S3Client,
   S3ServiceException,
+  type PutObjectCommandInput,
 } from "@aws-sdk/client-s3";
+import type { Readable as NodeReadable } from "node:stream";
 
 import type { MediaObject, MediaPutOptions, MediaStorage } from "../storage";
 
@@ -41,6 +43,24 @@ export class R2S3MediaStorage implements MediaStorage {
     value: ArrayBuffer,
     options: MediaPutOptions,
   ): Promise<MediaObject | null> {
+    return this.putObject(key, new Uint8Array(value), options);
+  }
+
+  async putStream(
+    key: string,
+    body: NodeReadable,
+    contentLength: number,
+    options: MediaPutOptions,
+  ): Promise<MediaObject | null> {
+    return this.putObject(key, body, options, contentLength);
+  }
+
+  private async putObject(
+    key: string,
+    body: PutObjectCommandInput["Body"],
+    options: MediaPutOptions,
+    contentLength?: number,
+  ): Promise<MediaObject | null> {
     const ifNoneMatch = options.onlyIf.get("If-None-Match");
     if (ifNoneMatch !== "*") {
       throw new Error('R2 media writes require If-None-Match: "*"');
@@ -51,7 +71,8 @@ export class R2S3MediaStorage implements MediaStorage {
         new PutObjectCommand({
           Bucket: this.bucketName,
           Key: key,
-          Body: new Uint8Array(value),
+          Body: body,
+          ContentLength: contentLength,
           IfNoneMatch: ifNoneMatch,
           ContentType: options.httpMetadata.contentType,
           CacheControl: options.httpMetadata.cacheControl,
@@ -71,6 +92,7 @@ export function createR2S3MediaStorage(config: R2S3StorageConfig): R2S3MediaStor
   const client = new S3Client({
     endpoint: config.endpoint,
     region: "auto",
+    requestChecksumCalculation: "WHEN_REQUIRED",
     credentials: {
       accessKeyId: config.accessKeyId,
       secretAccessKey: config.secretAccessKey,

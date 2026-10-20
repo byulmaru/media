@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-temporal-namespace
+  labels:
+    app.kubernetes.io/name: media
+    app.kubernetes.io/instance: {{ .Release.Name }}-temporal-namespace
+    app.kubernetes.io/component: temporal-namespace
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  activeDeadlineSeconds: 300
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: media
+        app.kubernetes.io/instance: {{ .Release.Name }}-temporal-namespace
+        app.kubernetes.io/component: temporal-namespace
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: temporal-namespace
+          image: {{ .Values.temporal.adminToolsImage | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              if temporal operator namespace create \
+                --address "${TEMPORAL_ADDRESS}" \
+                --tls=false \
+                --disable-config-env \
+                --disable-config-file \
+                --client-connect-timeout 10s \
+                --command-timeout 20s \
+                --namespace "${TEMPORAL_NAMESPACE}" \
+                --retention 30d; then
+                echo "Created Temporal namespace ${TEMPORAL_NAMESPACE}."
+                exit 0
+              fi
+
+              echo "Temporal namespace create did not succeed; reconciling the existing namespace."
+              temporal operator namespace update \
+                --address "${TEMPORAL_ADDRESS}" \
+                --tls=false \
+                --disable-config-env \
+                --disable-config-file \
+                --client-connect-timeout 10s \
+                --command-timeout 20s \
+                --namespace "${TEMPORAL_NAMESPACE}" \
+                --retention 30d
+              echo "Reconciled Temporal namespace ${TEMPORAL_NAMESPACE}."
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: {{ .Values.temporal.address | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.temporal.namespace | quote }}
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi

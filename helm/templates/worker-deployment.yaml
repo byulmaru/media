@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    app.kubernetes.io/name: media
+    app.kubernetes.io/instance: {{ .Release.Name }}-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/version: {{ .Values.version | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: media
+      app.kubernetes.io/instance: {{ .Release.Name }}-worker
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: media
+        app.kubernetes.io/instance: {{ .Release.Name }}-worker
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/version: {{ .Values.version | quote }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: worker
+          image: {{ printf "ghcr.io/byulmaru/media:%s@%s" .Values.version .Values.imageDigest | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "dist/worker.js"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: R2_ENDPOINT
+              value: {{ .Values.config.r2Endpoint | quote }}
+            - name: PUBLIC_BASE_URL
+              value: {{ .Values.config.publicBaseUrl | quote }}
+            - name: R2_BUCKET_NAME
+              value: {{ .Values.config.r2BucketName | quote }}
+            - name: R2_STAGING_BUCKET_NAME
+              value: {{ .Values.config.r2StagingBucketName | quote }}
+            - name: TEMPORAL_ADDRESS
+              value: {{ .Values.temporal.address | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.temporal.namespace | quote }}
+            - name: TEMPORAL_TASK_QUEUE
+              value: {{ .Values.temporal.taskQueue | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: R2_STAGING_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: R2_STAGING_ACCESS_KEY_ID
+            - name: R2_STAGING_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: R2_STAGING_SECRET_ACCESS_KEY
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
