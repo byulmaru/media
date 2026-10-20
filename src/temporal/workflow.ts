@@ -3,6 +3,7 @@ import {
   CancellationScope,
   condition,
   defineSignal,
+  log,
   proxyActivities,
   setHandler,
 } from "@temporalio/workflow";
@@ -108,9 +109,16 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
 
     return await processUploadImage(validatedInput);
   } finally {
-    await CancellationScope.nonCancellable(() => deleteUploadSource({
-      id: validatedInput.id,
-      sourceKey: validatedInput.sourceKey,
-    }));
+    try {
+      await CancellationScope.nonCancellable(() => deleteUploadSource({
+        id: validatedInput.id,
+        sourceKey: validatedInput.sourceKey,
+      }));
+    } catch {
+      log.warn("Upload source cleanup failed", {
+        event: "upload_source_cleanup_failed",
+        uploadId: validatedInput.id,
+      });
+    }
   }
 }

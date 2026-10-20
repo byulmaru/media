@@ -9,6 +9,7 @@ import {
   HeadObjectCommand,
   S3ServiceException,
 } from "@aws-sdk/client-s3";
+import { ApplicationFailure } from "@temporalio/activity";
 import { defaultPayloadConverter } from "@temporalio/client";
 import { TestWorkflowEnvironment } from "@temporalio/testing";
 import { bundleWorkflowCode, Worker } from "@temporalio/worker";
@@ -84,6 +85,7 @@ class MemoryStagingStorage {
   lastModifiedReads = new Map();
   contentReads = new Map();
   deleteKeys = [];
+  failDeleteKey;
 
   seed(key, bytes, lastModified = new Date()) {
     this.objects.set(key, { bytes: Uint8Array.from(bytes), lastModified });
@@ -105,6 +107,14 @@ class MemoryStagingStorage {
 
   async delete(key) {
     this.deleteKeys.push(key);
+    if (this.failDeleteKey === key) {
+      this.failDeleteKey = undefined;
+      throw ApplicationFailure.create({
+        message: "injected terminal staged-source cleanup failure",
+        type: "InjectedCleanupFailure",
+        nonRetryable: true,
+      });
+    }
     this.objects.delete(key);
   }
 }
@@ -375,6 +385,36 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.equal(stored.bytes.toString("ascii", 0, 4), "RIFF");
     assert.equal(stored.bytes.toString("ascii", 8, 12), "WEBP");
 
+    const cleanupFailure = newUpload();
+    staging.seed(cleanupFailure.sourceKey, PNG_1X1);
+    const cleanupFailureCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(cleanupFailure.id, cleanupFailure.sourceKey),
+      `cleanup-failure-caller:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(environment, staging, cleanupFailure.id, cleanupFailure.sourceKey);
+    const cleanupFailureOutputKey = `original/${cleanupFailure.id}.webp`;
+    staging.failDeleteKey = cleanupFailure.sourceKey;
+    await cleanupFailureCaller.signal("finishNexusUploadTest");
+    const cleanupFailureResult = await withTimeout(
+      cleanupFailureCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "published upload with a cleanup failure did not complete",
+    );
+    assert.equal(media.objects.has(cleanupFailureOutputKey), true);
+    assert.equal(media.putCounts.get(cleanupFailureOutputKey), 1);
+    assert.equal(staging.objects.has(cleanupFailure.sourceKey), true);
+    assert.equal(staging.deleteKeys.filter((key) => key === cleanupFailure.sourceKey).length, 1);
+    assert.deepEqual(cleanupFailureResult, {
+      upload: {
+        id: cleanupFailure.id,
+        url: `${PUBLIC_BASE_URL}/${cleanupFailureOutputKey}`,
+        mediaType: "image/webp",
+      },
+      publishResults: [{ id: cleanupFailure.id }, { id: cleanupFailure.id }],
+    });
+
     const completedPublish = await environment.client.workflow.start("nexusPublishCallerWorkflow", {
       workflowId: `publish-completed:${randomUUID()}`,
       taskQueue: TASK_QUEUE,
@@ -397,6 +437,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       `bad-image-caller:${randomUUID()}`,
     );
     await awaitUploadWorkflowWaiting(environment, staging, badImage.id, badImage.sourceKey);
+    staging.failDeleteKey = badImage.sourceKey;
     await badImageCaller.signal("finishNexusUploadTest");
     const badImageResult = await withTimeout(
       badImageCaller.result(),
@@ -404,9 +445,11 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       "invalid image did not fail after publication",
     );
     assert.match(badImageResult.error, /invalid_image|upload validation failed/i);
+    assert.doesNotMatch(badImageResult.error, /InjectedCleanupFailure|cleanup failure/i);
     assert.equal(media.putCounts.get(`original/${badImage.id}.webp`) ?? 0, 0);
-    assert.equal(staging.objects.has(badImage.sourceKey), false);
+    assert.equal(staging.objects.has(badImage.sourceKey), true);
     assert.equal(staging.contentReads.get(badImage.sourceKey), 1);
+    assert.equal(staging.deleteKeys.filter((key) => key === badImage.sourceKey).length, 1);
 
     for (const [label, lastModified] of [
       ["missing", null],

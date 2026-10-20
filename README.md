@@ -73,7 +73,7 @@ export async function callerWorkflow(input: ProcessUploadInput) {
 }
 ```
 
-호출 측은 사용자의 게시 요청을 workflow signal로 기록한 뒤 `publishUpload`를 실행합니다. 게시 대기 중 만료나 처리 실패가 먼저 발생할 수 있어 `startUpload` 결과와 signal을 함께 기다립니다. 호출 측 Workflow는 Nexus 취소 handler가 대상 `startUpload` 취소를 수락할 때까지 열려 있습니다. Source 정리는 비동기라 호출 측 종료 시 완료됐다고 보장되지 않습니다. `{ id }` acknowledgement는 게시 명령이 접수됐다는 뜻이며 이미지 공개 완료를 뜻하지 않습니다. 공개 저장이 끝난 `{ id, url, mediaType }` 결과를 사용하기 전에 `startUpload` operation의 `result()`를 기다립니다. 24시간 안에 게시하지 않거나 workflow가 취소되거나 처리가 최종 실패하면 Worker가 private source를 정리합니다. 게시 명령으로 처리가 시작된 뒤에는 취소나 회수 요청이 진행 중인 공개 저장을 막거나 이미 공개된 이미지를 되돌린다고 보장하지 않습니다.
+호출 측은 사용자의 게시 요청을 workflow signal로 기록한 뒤 `publishUpload`를 실행합니다. 게시 대기 중 만료나 처리 실패가 먼저 발생할 수 있어 `startUpload` 결과와 signal을 함께 기다립니다. 호출 측 Workflow는 Nexus 취소 handler가 대상 `startUpload` 취소를 수락할 때까지 열려 있습니다. Source 정리는 비동기라 호출 측 종료 시 완료됐다고 보장되지 않습니다. `{ id }` acknowledgement는 게시 명령이 접수됐다는 뜻이며 이미지 공개 완료를 뜻하지 않습니다. 공개 저장이 끝난 `{ id, url, mediaType }` 결과를 사용하기 전에 `startUpload` operation의 `result()`를 기다립니다. 24시간 안에 게시하지 않거나 workflow가 취소되거나 처리가 최종 실패하면 Worker가 private source를 정리합니다. 원본 삭제가 재시도 후에도 실패하면 Worker는 업로드 ID를 포함해 경고를 남기고 48시간 lifecycle 만료에 맡기며, 이 삭제 실패는 게시 결과를 덮어쓰거나 원래 Workflow 오류를 대체하지 않습니다. 게시 명령으로 처리가 시작된 뒤에는 취소나 회수 요청이 진행 중인 공개 저장을 막거나 이미 공개된 이미지를 되돌린다고 보장하지 않습니다.
 
 Worker는 Wrangler `MEDIA` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. 두 런타임은 같은 encoder와 객체 형식, metadata를 사용합니다. 점진적으로 전환할 때는 두 런타임의 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`을 맞추고, Node의 `R2_BUCKET_NAME`은 Worker의 `MEDIA` binding과 같은 `byulmaru-media` bucket을 가리키도록 설정합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
 
