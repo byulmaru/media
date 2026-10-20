@@ -2,7 +2,7 @@
 
 JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 Cloudflare R2에 저장하는 업로드 서비스입니다. 같은 API를 Cloudflare Worker와 Node.js 서버로 실행할 수 있습니다. 두 런타임은 같은 R2 bucket과 `original/<id>.webp` 객체 key를 사용하므로 트래픽을 단계적으로 전환할 수 있습니다. 공개 이미지는 `https://media.byulma.run`에서 제공합니다.
 
-HTTP 업로드 경로는 단일 스레드 WASM인 jSquash로 이미지를 변환하고, Temporal 업로드 Activity는 Node.js의 비동기 native Sharp pipeline을 사용합니다.
+HTTP 업로드 경로는 단일 스레드 WASM인 jSquash로 이미지를 변환하고, Temporal 업로드 Activity는 `maxBytes` 안에서 source 전체를 읽어 검증한 뒤 Node.js Sharp pipeline으로 WebP를 인코딩해 알려진 크기와 함께 R2에 스트리밍합니다. Sharp 내부 buffering은 계속 발생하며, Sharp pipeline 오류는 비재시도 `invalid_image` 검증 오류로 분류합니다.
 
 ## Architecture
 

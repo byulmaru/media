@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { Readable } from "node:stream";
 import { test } from "node:test";
 import sharp from "sharp";
 
 import {
   GetObjectCommand,
   HeadObjectCommand,
+  S3Client,
   S3ServiceException,
 } from "@aws-sdk/client-s3";
 import { ApplicationFailure } from "@temporalio/activity";
@@ -19,6 +21,7 @@ import {
   JPEG_ORIENTED_2X1,
   mediaServiceHandler,
   PNG_RGBA_2X1,
+  R2S3MediaStorage,
   R2S3StagingStorage,
 } from "../dist/temporal/test-runtime.js";
 
@@ -129,20 +132,47 @@ class MemoryStagingStorage {
 class MemoryMediaStorage {
   objects = new Map();
   putCounts = new Map();
+  streams = new Map();
+  streamReads = new Map();
   failAfterCommitKey;
+  failStreamKey;
+  failStreamError;
+  conflictKey;
 
   async head(key) {
+    if (key === this.conflictKey) {
+      this.conflictKey = undefined;
+      return null;
+    }
     const object = this.objects.get(key);
     return object ? { httpMetadata: object.httpMetadata } : null;
   }
 
-  async put(key, bytes, options) {
+  async putStream(key, body, contentLength, options) {
     assert.equal(options.onlyIf.get("If-None-Match"), "*");
     assert.equal(options.httpMetadata.contentType, "image/webp");
+    assert.equal(typeof contentLength, "number");
     this.putCounts.set(key, (this.putCounts.get(key) ?? 0) + 1);
+    this.streams.set(key, body);
+    if (this.failStreamKey === key) {
+      this.failStreamKey = undefined;
+      const error = this.failStreamError;
+      this.failStreamError = undefined;
+      if (error) {
+        body.once("error", () => {});
+        body.destroy(error);
+        throw error;
+      }
+      throw new Error("injected media stream failure");
+    }
     if (this.objects.has(key)) return null;
+    const chunks = [];
+    this.streamReads.set(key, (this.streamReads.get(key) ?? 0) + 1);
+    for await (const chunk of body) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks);
+    assert.equal(bytes.byteLength, contentLength);
     this.objects.set(key, {
-      bytes: Buffer.from(bytes),
+      bytes,
       httpMetadata: options.httpMetadata,
     });
     if (this.failAfterCommitKey === key) {
@@ -152,6 +182,73 @@ class MemoryMediaStorage {
     return {};
   }
 }
+
+test("R2 S3 media writes stream the known-length body with create-once metadata", async () => {
+  const requests = [];
+  let statusCode = 200;
+  const client = new S3Client({
+    endpoint: "https://r2.test",
+    region: "auto",
+    maxAttempts: 1,
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    credentials: { accessKeyId: "test", secretAccessKey: "test" },
+    requestHandler: {
+      async handle(request) {
+        const chunks = [];
+        for await (const chunk of request.body) chunks.push(Buffer.from(chunk));
+        requests.push({
+          method: request.method,
+          headers: { ...request.headers },
+          body: Buffer.concat(chunks),
+        });
+        return {
+          response: {
+            statusCode,
+            headers: {},
+            body: Readable.from(statusCode === 200 ? [] : [
+              "<Error><Code>PreconditionFailed</Code><Message>already exists</Message></Error>",
+            ]),
+          },
+        };
+      },
+    },
+  });
+  const storage = new R2S3MediaStorage(client, "media");
+  const bytes = Buffer.from("encoded webp bytes");
+  const options = {
+    onlyIf: new Headers({ "If-None-Match": "*" }),
+    httpMetadata: {
+      contentType: "image/webp",
+      cacheControl: "public, max-age=31536000, immutable",
+    },
+  };
+
+  assert.deepEqual(await storage.putStream("original/u_test.webp", Readable.from([bytes]), bytes.byteLength, options), {});
+  const request = requests[0];
+  assert.equal(request.method, "PUT");
+  assert.equal(request.headers["content-length"], String(bytes.byteLength));
+  assert.equal(request.headers["if-none-match"], "*");
+  assert.equal(request.headers["content-type"], "image/webp");
+  assert.equal(request.headers["cache-control"], options.httpMetadata.cacheControl);
+  assert.equal(request.body.compare(bytes), 0);
+  assert.doesNotMatch(request.headers["content-encoding"] ?? "", /aws-chunked/i);
+  assert.equal(request.headers["transfer-encoding"], undefined);
+  assert.equal(request.headers.trailer, undefined);
+  assert.equal(request.headers["x-amz-trailer"], undefined);
+
+  statusCode = 412;
+  assert.equal(await storage.putStream("original/u_test.webp", Readable.from([bytes]), bytes.byteLength, options), null);
+  assert.equal(requests[1].headers["if-none-match"], "*");
+
+  statusCode = 500;
+  await assert.rejects(
+    storage.putStream("original/u_test.webp", Readable.from([bytes]), bytes.byteLength, options),
+    (error) => {
+      assert.equal(error.$metadata.httpStatusCode, 500);
+      return true;
+    },
+  );
+});
 
 function uploadInput(id, sourceKey, contentType = "image/png") {
   return {
@@ -263,6 +360,8 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
 
   const orientedImage = media.objects.get(`original/${oriented.id}.webp`);
   assert(orientedImage);
+  assert.equal(media.streamReads.get(`original/${oriented.id}.webp`), 1);
+  assert.equal(media.streams.get(`original/${oriented.id}.webp`).destroyed, true);
   const orientedMetadata = await sharp(orientedImage.bytes).metadata();
   assert.equal(orientedMetadata.format, "webp");
   assert.equal(orientedMetadata.width, 1);
@@ -272,6 +371,8 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
 
   const transparentImage = media.objects.get(`original/${transparent.id}.webp`);
   assert(transparentImage);
+  assert.equal(media.streamReads.get(`original/${transparent.id}.webp`), 1);
+  assert.equal(media.streams.get(`original/${transparent.id}.webp`).destroyed, true);
   const decoded = await sharp(transparentImage.bytes)
     .ensureAlpha()
     .raw()
@@ -301,6 +402,55 @@ test("Temporal activity classifies native malformed decodes as non-retryable inv
   assert.equal(media.putCounts.get(`original/${malformed.id}.webp`) ?? 0, 0);
   assert.equal(media.objects.has(`original/${malformed.id}.webp`), false);
   assert.equal(staging.contentReads.get(malformed.sourceKey), 1);
+  assert.equal(media.streams.size, 0);
+});
+
+test("Temporal activity destroys an unconsumed WebP stream after a conditional conflict or storage error", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const conflict = newUpload();
+  const conflictKey = `original/${conflict.id}.webp`;
+  staging.seed(conflict.sourceKey, PNG_1X1);
+  media.objects.set(conflictKey, {
+    bytes: Buffer.from("already committed"),
+    httpMetadata: { contentType: "image/webp" },
+  });
+  media.conflictKey = conflictKey;
+  await activities.processUploadImage(uploadInput(conflict.id, conflict.sourceKey));
+  assert.equal(media.putCounts.get(conflictKey), 1);
+  assert.equal(media.streamReads.get(conflictKey) ?? 0, 0);
+  assert.equal(media.streams.get(conflictKey).destroyed, true);
+
+  const failed = newUpload();
+  const failedKey = `original/${failed.id}.webp`;
+  staging.seed(failed.sourceKey, PNG_1X1);
+  media.failStreamKey = failedKey;
+  await assert.rejects(
+    activities.processUploadImage(uploadInput(failed.id, failed.sourceKey)),
+    /injected media stream failure/,
+  );
+  assert.equal(media.putCounts.get(failedKey), 1);
+  assert.equal(media.streamReads.get(failedKey) ?? 0, 0);
+  assert.equal(media.streams.get(failedKey).destroyed, true);
+  assert.equal(media.objects.has(failedKey), false);
+
+  const transportFailed = newUpload();
+  const transportFailedKey = `original/${transportFailed.id}.webp`;
+  const transportError = new Error("injected R2 request failure");
+  staging.seed(transportFailed.sourceKey, PNG_1X1);
+  media.failStreamKey = transportFailedKey;
+  media.failStreamError = transportError;
+  await assert.rejects(
+    activities.processUploadImage(uploadInput(transportFailed.id, transportFailed.sourceKey)),
+    (error) => {
+      assert.equal(error, transportError);
+      assert.equal(error instanceof ApplicationFailure, false);
+      return true;
+    },
+  );
+  assert.equal(media.putCounts.get(transportFailedKey), 1);
+  assert.equal(media.streams.get(transportFailedKey).destroyed, true);
 });
 
 test("Nexus upload operations wait, publish idempotently, and clean up terminal workflows", async () => {

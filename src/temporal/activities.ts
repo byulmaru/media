@@ -3,8 +3,8 @@ import { ApplicationFailure } from "@temporalio/activity";
 import { IMMUTABLE_CACHE_CONTROL } from "../constants";
 import { HttpError } from "../errors";
 import { assertImageWithinLimits, inspectImage } from "../image-info";
+import type { R2S3MediaStorage } from "../storage/r2-s3";
 import { transcodeUploadImage } from "./codec";
-import type { MediaStorage } from "../storage";
 import type { UploadStagingStorage } from "../storage/staging";
 import type {
   ProcessUploadInput,
@@ -57,7 +57,7 @@ function invalidUploadSource(): ApplicationFailure {
 
 export function createUploadProcessingActivities(
   staging: UploadStagingStorage,
-  media: MediaStorage,
+  media: Pick<R2S3MediaStorage, "head" | "putStream">,
   publicBaseUrl: string,
 ) {
   return {
@@ -110,28 +110,39 @@ export function createUploadProcessingActivities(
 
         const transformStarted = Date.now();
         const output = await transcodeUploadImage(bytes);
-        console.log(JSON.stringify({
-          event: "image_transform",
-          sourceKind: "upload",
-          sourceFormat: info.format,
-          inputBytes: bytes.byteLength,
-          outputBytes: output.bytes.byteLength,
-          width: output.width,
-          height: output.height,
-          durationMs: Date.now() - transformStarted,
-        }));
+        try {
+          console.log(
+            JSON.stringify({
+              event: "image_transform",
+              sourceKind: "upload",
+              sourceFormat: info.format,
+              inputBytes: bytes.byteLength,
+              outputBytes: output.size,
+              width: output.width,
+              height: output.height,
+              durationMs: Date.now() - transformStarted,
+            }),
+          );
 
-        const stored = await media.put(outputKey, output.bytes, {
-          onlyIf: new Headers({ "If-None-Match": "*" }),
-          httpMetadata: {
-            contentType: "image/webp",
-            cacheControl: IMMUTABLE_CACHE_CONTROL,
-          },
-        });
-        if (!stored && !(await media.head(outputKey))) {
-          throw new Error("conditional media write could not be confirmed");
+          const stored = await media.putStream(
+            outputKey,
+            output.stream,
+            output.size,
+            {
+              onlyIf: new Headers({ "If-None-Match": "*" }),
+              httpMetadata: {
+                contentType: "image/webp",
+                cacheControl: IMMUTABLE_CACHE_CONTROL,
+              },
+            },
+          );
+          if (!stored && !(await media.head(outputKey))) {
+            throw new Error("conditional media write could not be confirmed");
+          }
+          return result;
+        } finally {
+          output.stream.destroy();
         }
-        return result;
       } catch (error) {
         throw asNonRetryableValidationFailure(error) ?? error;
       }
