@@ -2,15 +2,19 @@ import { serve } from "@hono/node-server";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { app } from "./app";
+import { createApp } from "./app";
 import { initializeNodeCodec } from "./codec.node";
 import { assertConfig } from "./middleware/config";
 import { createR2S3MediaStorage } from "./storage/r2-s3";
+import { createR2S3StagingStorage } from "./storage/staging";
 import type { MediaStorage } from "./storage";
 import type { Env } from "./types";
-import { nodeServerConfigSchema } from "./validation";
+import type { UploadProcessor } from "./upload-processing";
+import { createTemporalUploadProcessor } from "./temporal/client";
+import { nodeServerConfigSchema, temporalUploadConfigSchema } from "./validation";
 
 export { R2S3MediaStorage } from "./storage/r2-s3";
+export { R2S3StagingStorage, createR2S3StagingStorage } from "./storage/staging";
 
 function readNodeConfig(source: NodeJS.ProcessEnv) {
   const result = nodeServerConfigSchema.safeParse(source);
@@ -32,6 +36,7 @@ function readNodeConfig(source: NodeJS.ProcessEnv) {
 export async function startServer(
   source: NodeJS.ProcessEnv = process.env,
   mediaStorage?: MediaStorage,
+  processor?: UploadProcessor,
 ): Promise<ReturnType<typeof serve>> {
   const {
     PORT: port,
@@ -54,6 +59,28 @@ export async function startServer(
       accessKeyId,
       secretAccessKey,
     });
+  let uploadProcessor = processor;
+  let closeUploadProcessor: (() => Promise<void>) | undefined;
+  if (!uploadProcessor) {
+    const temporalConfig = temporalUploadConfigSchema.safeParse(source);
+    if (temporalConfig.success) {
+      const temporal = createTemporalUploadProcessor(
+        {
+          address: temporalConfig.data.TEMPORAL_ADDRESS,
+          namespace: temporalConfig.data.TEMPORAL_NAMESPACE,
+          taskQueue: temporalConfig.data.TEMPORAL_TASK_QUEUE,
+        },
+        createR2S3StagingStorage({
+          endpoint: temporalConfig.data.R2_ENDPOINT,
+          bucketName: temporalConfig.data.R2_STAGING_BUCKET_NAME,
+          accessKeyId: temporalConfig.data.R2_STAGING_ACCESS_KEY_ID,
+          secretAccessKey: temporalConfig.data.R2_STAGING_SECRET_ACCESS_KEY,
+        }),
+      );
+      uploadProcessor = temporal.process;
+      closeUploadProcessor = () => temporal.close();
+    }
+  }
   const bindings: Env = {
     MEDIA: media,
     API_KEY: apiKey,
@@ -65,11 +92,18 @@ export async function startServer(
   assertConfig(bindings);
   await initializeNodeCodec();
 
-  return serve({
+  const app = createApp(uploadProcessor, true);
+  const server = serve({
     fetch: (request) => app.fetch(request, bindings),
     hostname: "0.0.0.0",
     port,
   });
+  if (closeUploadProcessor) {
+    server.once("close", () => {
+      void closeUploadProcessor!().catch((error: unknown) => console.error(error));
+    });
+  }
+  return server;
 }
 
 if (
