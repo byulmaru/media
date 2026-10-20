@@ -2,7 +2,7 @@
 
 JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 Cloudflare R2에 저장하는 업로드 서비스입니다. 같은 API를 Cloudflare Worker와 Node.js 서버로 실행할 수 있습니다. 두 런타임은 같은 R2 bucket과 `original/<id>.webp` 객체 key를 사용하므로 트래픽을 단계적으로 전환할 수 있습니다. 공개 이미지는 `https://media.byulma.run`에서 제공합니다.
 
-이미지 변환에는 Cloudflare Images 대신 단일 스레드 WASM인 jSquash를 사용합니다.
+HTTP 업로드 경로는 단일 스레드 WASM인 jSquash로 이미지를 변환하고, Temporal 업로드 Activity는 Node.js의 비동기 native Sharp pipeline을 사용합니다.
 
 ## Architecture
 
@@ -175,7 +175,7 @@ docker run --rm -p 3000:3000 --env-file /path/to/runtime.env ghcr.io/byulmaru/me
 
 ## Temporal Worker
 
-Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 API와 같은 image digest를 사용합니다. 필요한 환경 변수는 다음과 같습니다.
+Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 API와 같은 image digest를 사용합니다. Temporal Activity는 Sharp로 source를 비동기 decode한 뒤 WebP로 encode합니다. 필요한 환경 변수는 다음과 같습니다.
 
 - Temporal: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`
 - Bucket 설정: `PUBLIC_BASE_URL`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_STAGING_BUCKET_NAME`

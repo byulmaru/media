@@ -3,8 +3,7 @@ import { ApplicationFailure } from "@temporalio/activity";
 import { IMMUTABLE_CACHE_CONTROL } from "../constants";
 import { HttpError } from "../errors";
 import { assertImageWithinLimits, inspectImage } from "../image-info";
-import { transcodeOriginal } from "../codec";
-import { initializeNodeCodec } from "../codec.node";
+import { transcodeUploadImage } from "./codec";
 import type { MediaStorage } from "../storage";
 import type { UploadStagingStorage } from "../storage/staging";
 import type {
@@ -37,10 +36,6 @@ function asNonRetryableValidationFailure(error: unknown): ApplicationFailure | u
     nonRetryable: true,
     details: [{ status: error.status, code: error.code }],
   });
-}
-
-export async function initializeUploadProcessingCodec(): Promise<void> {
-  await initializeNodeCodec();
 }
 
 function invalidProcessingInput(): ApplicationFailure {
@@ -114,7 +109,7 @@ export function createUploadProcessingActivities(
         });
 
         const transformStarted = Date.now();
-        const output = await transcodeOriginal(bytes, info.format);
+        const output = await transcodeUploadImage(bytes);
         console.log(JSON.stringify({
           event: "image_transform",
           sourceKind: "upload",

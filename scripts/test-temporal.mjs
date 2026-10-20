@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
+import sharp from "sharp";
 
 import {
   GetObjectCommand,
@@ -15,8 +16,9 @@ import { TestWorkflowEnvironment } from "@temporalio/testing";
 import { bundleWorkflowCode, Worker } from "@temporalio/worker";
 import {
   createUploadProcessingActivities,
-  initializeUploadProcessingCodec,
+  JPEG_ORIENTED_2X1,
   mediaServiceHandler,
+  PNG_RGBA_2X1,
   R2S3StagingStorage,
 } from "../dist/temporal/test-runtime.js";
 
@@ -151,11 +153,11 @@ class MemoryMediaStorage {
   }
 }
 
-function uploadInput(id, sourceKey) {
+function uploadInput(id, sourceKey, contentType = "image/png") {
   return {
     id,
     sourceKey,
-    contentType: "image/png",
+    contentType,
     maxBytes: 1024 * 1024,
     maxDimension: 8192,
   };
@@ -247,8 +249,61 @@ function startedInput(history) {
   );
 }
 
+test("Temporal image activity applies JPEG orientation and preserves WebP transparency", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const oriented = newUpload();
+  const transparent = newUpload();
+  staging.seed(oriented.sourceKey, JPEG_ORIENTED_2X1);
+  staging.seed(transparent.sourceKey, PNG_RGBA_2X1);
+
+  await activities.processUploadImage(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
+  await activities.processUploadImage(uploadInput(transparent.id, transparent.sourceKey));
+
+  const orientedImage = media.objects.get(`original/${oriented.id}.webp`);
+  assert(orientedImage);
+  const orientedMetadata = await sharp(orientedImage.bytes).metadata();
+  assert.equal(orientedMetadata.format, "webp");
+  assert.equal(orientedMetadata.width, 1);
+  assert.equal(orientedMetadata.height, 2);
+  assert.equal(orientedMetadata.orientation, undefined);
+  assert.equal(orientedMetadata.exif, undefined);
+
+  const transparentImage = media.objects.get(`original/${transparent.id}.webp`);
+  assert(transparentImage);
+  const decoded = await sharp(transparentImage.bytes)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  assert.equal(decoded.info.width, 2);
+  assert.equal(decoded.info.height, 1);
+  assert.equal(decoded.data[7], 0);
+});
+
+test("Temporal activity classifies native malformed decodes as non-retryable invalid_image without a public write", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const malformed = newUpload();
+  staging.seed(malformed.sourceKey, PNG_RGBA_2X1.slice(0, 30));
+
+  await assert.rejects(
+    activities.processUploadImage(uploadInput(malformed.id, malformed.sourceKey)),
+    (error) => {
+      assert(error instanceof ApplicationFailure);
+      assert.equal(error.type, "UploadValidationError");
+      assert.equal(error.nonRetryable, true);
+      assert.deepEqual(error.details, [{ status: 422, code: "invalid_image" }]);
+      return true;
+    },
+  );
+  assert.equal(media.putCounts.get(`original/${malformed.id}.webp`) ?? 0, 0);
+  assert.equal(media.objects.has(`original/${malformed.id}.webp`), false);
+  assert.equal(staging.contentReads.get(malformed.sourceKey), 1);
+});
+
 test("Nexus upload operations wait, publish idempotently, and clean up terminal workflows", async () => {
-  await initializeUploadProcessingCodec();
   const workflowBundle = await bundleWorkflowCode({
     workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
   });

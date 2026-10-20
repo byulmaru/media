@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createR2S3MediaStorage } from "../storage/r2-s3";
 import { createR2S3StagingStorage } from "../storage/staging";
 import { temporalUploadConfigSchema } from "../validation";
-import { createUploadProcessingActivities, initializeUploadProcessingCodec } from "./activities";
+import { createUploadProcessingActivities } from "./activities";
 import { mediaServiceHandler } from "./nexus";
 
 function readWorkerConfig(source: NodeJS.ProcessEnv) {
@@ -18,8 +18,6 @@ function readWorkerConfig(source: NodeJS.ProcessEnv) {
 
 export async function startWorker(source: NodeJS.ProcessEnv = process.env): Promise<void> {
   const config = readWorkerConfig(source);
-  await initializeUploadProcessingCodec();
-
   const media = createR2S3MediaStorage({
     endpoint: config.R2_ENDPOINT,
     bucketName: config.R2_BUCKET_NAME,

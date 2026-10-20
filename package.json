@@ -35,6 +35,7 @@
     "@temporalio/workflow": "1.23.0",
     "hono": "^4.10.8",
     "nexus-rpc": "0.0.3",
+    "sharp": "0.34.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {
