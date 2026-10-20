@@ -1,25 +1,19 @@
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { z } from "zod";
 
 import { createR2S3MediaStorage } from "../storage/r2-s3";
 import { createR2S3StagingStorage } from "../storage/staging";
 import { temporalUploadConfigSchema } from "../validation";
 import { createUploadProcessingActivities, initializeUploadProcessingCodec } from "./activities";
-
-const publicCredentialsSchema = z.object({
-  AWS_ACCESS_KEY_ID: z.string().refine((value) => value.trim().length > 0),
-  AWS_SECRET_ACCESS_KEY: z.string().refine((value) => value.trim().length > 0),
-});
+import { mediaServiceHandler } from "./nexus";
 
 function readWorkerConfig(source: NodeJS.ProcessEnv) {
   const temporal = temporalUploadConfigSchema.safeParse(source);
-  const publicCredentials = publicCredentialsSchema.safeParse(source);
-  if (!temporal.success || !publicCredentials.success) {
+  if (!temporal.success) {
     throw new Error("Temporal upload worker configuration is incomplete");
   }
-  return { ...temporal.data, ...publicCredentials.data };
+  return temporal.data;
 }
 
 export async function startWorker(source: NodeJS.ProcessEnv = process.env): Promise<void> {
@@ -47,7 +41,8 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
       workflowBundle: {
         codePath: fileURLToPath(new URL("./workflows.js", import.meta.url)),
       },
-      activities: createUploadProcessingActivities(staging, media),
+      activities: createUploadProcessingActivities(staging, media, config.PUBLIC_BASE_URL),
+      nexusServices: [mediaServiceHandler],
       maxConcurrentActivityTaskExecutions: 1,
     });
     await worker.run();

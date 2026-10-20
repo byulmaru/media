@@ -1,31 +1,83 @@
 # byulmaru media
 
-JPEG, PNG, WebP 이미지를 검증하고 WebP로 저장하는 업로드 서비스입니다. 기존 `/v1`은 요청 안에서 변환을 끝내고, `/v2`는 비공개 R2 staging에 저장한 원본을 Temporal Worker가 비동기 처리하며 API는 처리가 끝날 때까지 HTTP 요청을 기다립니다. 두 경로의 결과는 기존 공개 bucket의 `original/<id>.webp`에 저장되며 `https://media.byulma.run`에서 제공합니다.
+JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 Cloudflare R2에 저장하는 업로드 서비스입니다. 같은 API를 Cloudflare Worker와 Node.js 서버로 실행할 수 있습니다. 두 런타임은 같은 R2 bucket과 `original/<id>.webp` 객체 key를 사용하므로 트래픽을 단계적으로 전환할 수 있습니다. 공개 이미지는 `https://media.byulma.run`에서 제공합니다.
 
 이미지 변환에는 Cloudflare Images 대신 단일 스레드 WASM인 jSquash를 사용합니다.
 
 ## Architecture
 
-### v1: 기존 inline 업로드
-
 1. 인증된 Kosmo backend가 `POST /v1/uploads`를 호출합니다.
 2. API가 `u_<UUIDv4>` ID와 10분짜리 signed upload URL을 반환합니다.
 3. 브라우저가 signed URL에 원본 이미지를 `PUT`합니다.
-4. 같은 API 요청이 이미지 제한을 검증하고 WebP로 변환해 `original/<id>.webp`에 저장합니다.
+4. API가 이미지 제한을 검증하고 WebP로 변환해 `original/<id>.webp`에 한 번만 저장합니다.
 5. 성공 응답의 `url`은 `https://media.byulma.run/original/<id>.webp`를 가리킵니다.
+6. 이미지 GET과 HEAD는 API 런타임을 통하지 않고 R2 custom domain으로 전달됩니다.
 
-### v2: Temporal 업로드
+### Temporal Nexus 비동기 업로드
 
-1. 인증된 backend가 같은 API host의 `POST /v2/uploads`를 호출합니다. API는 v1과 같은 ticket 필드(`id`, `uploadUrl`, `expiresAt`)로 `201`을 반환합니다.
-2. 브라우저가 signed URL에 원본 bytes를 `PUT`하면 API가 검증 후 private `byulmaru-media-staging` bucket에 저장하고 Temporal Workflow 처리를 기다립니다.
-3. `media-upload` task queue의 별도 `media-worker` Deployment가 원본을 WebP로 변환해 기존 공개 bucket의 `original/<id>.webp`에 저장한 뒤 staging object를 삭제합니다.
-4. 처리가 끝나면 PUT은 v1과 같은 `{ "id", "url" }` 응답으로 `201`을 반환합니다. `/v2/uploads/<id>`의 GET/HEAD 조회도 v1과 같은 저장 표현을 사용합니다.
+호출자가 비공개 staging bucket에 원본 object를 먼저 저장한 다음, 호출 측 Temporal Workflow에서 `mediaService.startUpload`를 시작합니다. 호출 측이 upload URL이나 credentials를 관리하며, Nexus에는 object key와 이미지 제한만 전달합니다. 원본 bytes와 signed URL은 Nexus request나 Temporal history에 넣지 않습니다. Source key는 `uploads/<id>/<source-uuid>` 형식이고, `id`는 `u_<UUIDv4>`입니다.
 
-API와 Worker는 같은 image digest를 사용하지만 별도 Deployment입니다. Temporal Worker가 중단되어도 `/v1`은 inline으로 계속 동작하며, `/v2` 처리에만 영향을 줍니다. Temporal 설정이나 staging credentials가 없으면 `/v2`는 `503`을 반환하고 `/v1`은 시작 및 동작을 계속합니다. Temporal namespace는 `media`, task queue는 `media-upload`입니다.
+Worker는 object metadata에서 `LastModified`를 확인하고 그 시각부터 24시간의 게시 기한을 계산합니다. Workflow는 호출 측이 게시를 요청할 때까지 durable condition으로 기다린 뒤, private object를 읽고 검증·변환하여 `original/<id>.webp`에 한 번만 저장합니다. Nexus의 `startUpload`에는 25시간 `scheduleToCloseTimeout`을 지정하며, 실제 게시 기한은 object의 `LastModified`부터 24시간입니다.
 
-Worker는 Wrangler `MEDIA` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. `/v1` Worker와 Node 서버는 같은 encoder와 객체 형식, metadata를 사용합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
+```ts
+import {
+  CancellationScope,
+  condition,
+  createNexusServiceClient,
+  defineSignal,
+  isCancellation,
+  setHandler,
+} from "@temporalio/workflow";
+import type { ProcessUploadInput } from "../src/temporal/types";
+import { mediaService } from "../src/temporal/service";
 
-Production API는 `media-api.byulmaru.co`에서 제공하며 Kubernetes ingress가 이 hostname을 처리합니다. Cloudflare Worker 코드와 배포는 남아 있지만 API route와 `workers.dev` endpoint는 비활성화합니다.
+const publishSignal = defineSignal("publishMediaUpload");
+
+async function rethrowAfterUploadCancellation(
+  error: unknown,
+  resultPromise: Promise<unknown>,
+): Promise<never> {
+  if (!isCancellation(error)) throw error;
+  await CancellationScope.nonCancellable(async () => {
+    try {
+      await resultPromise;
+    } catch (resultError) {
+      if (!isCancellation(resultError)) throw resultError;
+    }
+  });
+  throw error;
+}
+
+export async function callerWorkflow(input: ProcessUploadInput) {
+  const client = createNexusServiceClient({ service: mediaService, endpoint: "media-upload" });
+  let publishRequested = false;
+  setHandler(publishSignal, () => { publishRequested = true; });
+
+  const upload = await client.startOperation("startUpload", input, {
+    scheduleToCloseTimeout: "25 hours",
+  });
+  const resultPromise = upload.result();
+  try {
+    await Promise.race([
+      condition(() => publishRequested),
+      resultPromise,
+    ]);
+    const acknowledgement = await client.executeOperation("publishUpload", { id: input.id }, {
+      scheduleToCloseTimeout: "5 seconds",
+    });
+    const result = await resultPromise;
+    return { acknowledgement, result };
+  } catch (error) {
+    return await rethrowAfterUploadCancellation(error, resultPromise);
+  }
+}
+```
+
+호출 측은 사용자의 게시 요청을 workflow signal로 기록한 뒤 `publishUpload`를 실행합니다. 게시 대기 중 만료나 처리 실패가 먼저 발생할 수 있어 `startUpload` 결과와 signal을 함께 기다립니다. 호출 측 Workflow는 Nexus 취소 handler가 대상 `startUpload` 취소를 수락할 때까지 열려 있습니다. Source 정리는 비동기라 호출 측 종료 시 완료됐다고 보장되지 않습니다. `{ id }` acknowledgement는 게시 명령이 접수됐다는 뜻이며 이미지 공개 완료를 뜻하지 않습니다. 공개 저장이 끝난 `{ id, url, mediaType }` 결과를 사용하기 전에 `startUpload` operation의 `result()`를 기다립니다. 24시간 안에 게시하지 않거나 workflow가 취소되거나 처리가 최종 실패하면 Worker가 private source를 정리합니다. 게시 명령으로 처리가 시작된 뒤에는 취소나 회수 요청이 진행 중인 공개 저장을 막거나 이미 공개된 이미지를 되돌린다고 보장하지 않습니다.
+
+Worker는 Wrangler `MEDIA` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. 두 런타임은 같은 encoder와 객체 형식, metadata를 사용합니다. 점진적으로 전환할 때는 두 런타임의 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`을 맞추고, Node의 `R2_BUCKET_NAME`은 Worker의 `MEDIA` binding과 같은 `byulmaru-media` bucket을 가리키도록 설정합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
+
+Production API는 `media-api.byulmaru.co`에서 제공하며 Kubernetes ingress가 이 hostname을 처리합니다. Cloudflare Worker 코드와 배포는 남아 있지만, API route와 `workers.dev` endpoint는 비활성화합니다. 전환 뒤 최대 10분 동안 기존 Worker가 발급한 upload ticket이 Node.js 서버에서 실패할 수 있습니다.
 
 Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포함하지 않습니다.
 
@@ -33,14 +85,16 @@ Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포
 
 [Terraform](./terraform/main.tf)은 다음 Cloudflare 리소스를 관리합니다.
 
-- 공개 `byulmaru-media` R2 bucket, `media.byulma.run` custom domain, 공개 GET/HEAD CORS
-- 비공개 `byulmaru-media-staging` R2 bucket과 `uploads/` object의 24시간 lifecycle 만료
+- `byulmaru-media` R2 bucket
+- `media.byulma.run` R2 custom domain
+- 공개 GET/HEAD를 위한 R2 CORS
+- 비공개 `byulmaru-media-staging` R2 bucket. `uploads/` object는 48시간 lifecycle 만료를 backstop으로 사용하고, 미완료 multipart upload는 24시간 뒤 abort합니다.
 
-Staging bucket에는 custom domain, public CORS, `r2.dev` 공개 URL을 설정하지 않습니다. Cloudflare R2 bucket은 기본적으로 비공개이며 인터넷 공개에는 명시적 설정이 필요합니다. Lifecycle 만료는 staging 원본을 복구하는 보장이 아니라 worker가 처리하지 못한 object를 정리하는 backstop입니다. Cloudflare는 만료 시점 뒤 object를 보통 24시간 안에 삭제합니다. 자세한 내용은 [R2 public bucket 정책](https://developers.cloudflare.com/r2/buckets/public-buckets/)과 [object lifecycle 동작](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)을 참고하세요.
+Staging bucket에는 custom domain, public CORS, `r2.dev` URL을 설정하지 않습니다. Workflow의 게시 기한은 원본 object의 `LastModified`부터 24시간입니다. Lifecycle 만료는 남은 object를 정리하는 backstop입니다. Cloudflare는 만료 뒤 보통 24시간 이내에 object를 삭제하지만, 이는 보장된 최대 지연 시간이 아닙니다.
 
-Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js API와 Worker의 환경 변수는 실행 환경에서 주입합니다. 공개 bucket 자격 증명은 `byulmaru-media`에 필요한 권한만, staging 자격 증명은 `byulmaru-media-staging` object read/write 권한만 주도록 각각 분리해 Vault에 보관합니다. 어떤 R2 secret도 Helm values나 image에 넣지 않습니다.
+Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. R2 S3 access key는 서버의 secret store에 보관하고 이미지로 복사하지 않습니다. Staging key는 비공개 bucket의 object read/write만 허용합니다.
 
-Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 실행합니다. Pull request에서는 plan만 만들고 `main` push와 수동 실행에서는 새 saved plan을 적용합니다. State는 `byulmaru-terraform-state` S3 bucket의 `media/terraform.tfstate` key를 사용합니다.
+Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 실행합니다. Pull request에서는 plan만 만들고, `main` push와 수동 실행에서는 새 saved plan을 생성해 그대로 적용합니다. State는 `byulmaru-terraform-state` S3 bucket의 `media/terraform.tfstate` key를 사용합니다.
 
 Repository variables:
 
@@ -51,9 +105,9 @@ Repository variables:
 
 Repository secrets:
 
-- `CLOUDFLARE_API_TOKEN`: R2 bucket, custom domain, CORS와 lifecycle을 관리할 Terraform token
+- `CLOUDFLARE_API_TOKEN`: R2 bucket, custom domain과 CORS를 관리할 Terraform token
 
-Cloudflare Terraform API token에는 `Workers R2 Storage Read`와 `Workers R2 Storage Write` 권한이 필요합니다.
+Cloudflare API token에는 `Workers R2 Storage Read`와 `Workers R2 Storage Write` 권한이 필요합니다.
 
 로컬에서는 실제 backend에 연결하지 않고 구성을 검증합니다.
 
@@ -92,9 +146,6 @@ pnpm start:server
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `PUBLIC_API_BASE_URL`: 클라이언트가 호출하는 서버의 HTTPS public API origin. 로컬 개발에서는 `http://localhost`, `http://127.0.0.1`, `http://[::1]` origin도 허용합니다. Production에서는 Helm의 `host` 값이 이 origin을 정합니다.
-- `/v2`용 `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `R2_STAGING_BUCKET_NAME`, `R2_STAGING_ACCESS_KEY_ID`, `R2_STAGING_SECRET_ACCESS_KEY`. Production namespace는 `media`, task queue는 `media-upload`입니다. 앞의 네 값은 Helm의 안전한 설정이고 staging access key/secret은 Vault에서 주입합니다.
-
-Temporal `/v2` 설정은 선택 사항입니다. 설정 또는 staging credentials가 없으면 `/v2`는 `503`을 반환하고 기존 `/v1` 경로는 계속 실행됩니다.
 
 `PUBLIC_API_BASE_URL`은 Node가 signed upload URL에 넣는 외부 API origin입니다. reverse proxy의 내부 주소가 아니라 클라이언트가 호출하는 HTTPS public origin을 사용하며, 외부 HTTP origin은 거부합니다. Worker는 이 변수를 사용하지 않고 요청 URL을 사용합니다. S3 region은 `auto`로 고정합니다. R2 S3 access key는 이 bucket에 대한 읽기와 쓰기만 허용하도록 만들고 실행 환경의 secret store에 보관합니다. `PORT`는 선택 사항이며 기본값은 `3000`입니다. 서버는 `0.0.0.0`에서 listen합니다.
 
@@ -112,42 +163,19 @@ docker pull ghcr.io/byulmaru/media:latest
 docker run --rm -p 3000:3000 --env-file /path/to/runtime.env ghcr.io/byulmaru/media:latest
 ```
 
+## Temporal Worker
+
+Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 API와 같은 image digest를 사용합니다. 필요한 환경 변수는 다음과 같습니다.
+
+- Temporal: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`
+- Bucket 설정: `PUBLIC_BASE_URL`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_STAGING_BUCKET_NAME`
+- R2 credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `R2_STAGING_ACCESS_KEY_ID`, `R2_STAGING_SECRET_ACCESS_KEY`
+
+`AWS_*` pair는 공개 bucket에, `R2_STAGING_*` pair는 private staging bucket에만 접근하도록 제한합니다. Helm chart는 non-secret 설정을 values에서, 네 credentials를 Vault secret에서 Worker에 전달합니다.
+
 ## API
 
-### Create a v2 browser upload
-
-```http
-POST /v2/uploads
-Authorization: Bearer <API_KEY>
-Content-Type: application/json
-
-{"maxBytes":16777216,"maxDimension":8192}
-```
-
-`201 Created` ticket는 v1과 같은 필드를 사용합니다.
-
-```json
-{
-  "id": "u_...",
-  "uploadUrl": "https://media-api.byulmaru.co/v2/uploads/<signed-token>",
-  "expiresAt": "..."
-}
-```
-
-브라우저는 원본 bytes를 ticket의 `uploadUrl`에 `PUT`합니다. API가 검증을 마치면 private staging에 저장하고 Temporal Workflow가 처리를 완료할 때까지 응답을 기다립니다. 성공 시 v1과 같은 결과를 돌려줍니다.
-
-```json
-{
-  "id": "u_...",
-  "url": "https://media.byulma.run/original/u_....webp"
-}
-```
-
-브라우저의 `PUT` 요청은 Temporal Workflow가 끝날 때까지 최대 100초 기다립니다. 시간이 지나면 `503` (`processing_pending`)을 반환하지만 Workflow는 계속 실행되며, 인증된 `GET` 또는 `HEAD /v2/uploads/<id>`는 객체가 준비되기 전 `404`, 준비된 뒤 `GET 200` 또는 `HEAD 204`를 반환합니다. 실행 중이거나 완료된 upload ticket을 재사용하면 `409`를 반환합니다.
-
-v2 요청은 Temporal worker나 staging 설정이 없는 경우 `503`을 반환합니다. 이 설정은 `/v1`의 inline 업로드 경로를 차단하지 않습니다.
-
-### Create a v1 browser upload
+### Create a browser upload
 
 ```http
 POST /v1/uploads
@@ -248,11 +276,39 @@ pnpm infra:validate
 
 ## Kubernetes 배포 (Argo CD)
 
-1. Kubernetes repository의 Terraform이 Media GitHub OIDC identity에 Argo CD `media` project 접근 권한을 주고, 이 repository의 Terraform이 `helm/` chart를 `media` namespace에 배포하는 `media` Application을 만듭니다. 처음에는 자동 동기화가 꺼져 있습니다.
-2. `/v2`를 배포하기 전에 Kubernetes Temporal NetworkPolicy 변경을 적용해 `media` namespace만 Temporal frontend의 TCP 7233 ingress를 사용할 수 있게 합니다. Namespace 전체 허용이나 다른 namespace 접근은 추가하지 않습니다.
-3. 별도 storage 준비 변경으로 `byulmaru-media-staging` bucket과 lifecycle rule을 적용한 뒤 완료를 확인합니다. Terraform workflow와 media Deploy workflow는 서로 다른 workflow라 같은 main push에서 실행 순서가 보장되지 않습니다.
-4. Vault Secrets Operator와 `vso-kubernetes-sync` Kubernetes auth role이 필요합니다. KV v2 `secret/kubernetes/media`에 기존 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`와 함께 staging 전용 `R2_STAGING_ACCESS_KEY_ID`, `R2_STAGING_SECRET_ACCESS_KEY`를 저장합니다. Staging key에는 private `byulmaru-media-staging` bucket의 object read/write 권한만 부여하고 Git, Helm values, image에 저장하지 않습니다.
-5. Chart의 PreSync Job은 `media` Temporal namespace를 30일 retention으로 create/update한 뒤 worker Deployment를 동기화합니다. Temporal CLI는 현재 cluster server와 같은 `1.31.2` admin-tools digest를 쓰며 TLS와 config file/env 설정을 끕니다. NetworkPolicy를 먼저 적용해야 합니다.
-6. Chart의 기본 API host는 `media-api.byulmaru.co`이며 `host`가 HTTPRoute hostname과 `PUBLIC_API_BASE_URL`을 함께 정합니다. HTTPRoute는 `gateway/public` Gateway를 사용합니다. 이 repository는 DNS를 관리하지 않으며 공개 이미지 URL `media.byulma.run`은 그대로 둡니다.
-7. `main`에 push되면 Deploy workflow가 source SHA, `version`, `imageDigest`를 설정해 API와 별도 worker를 함께 동기화합니다. 두 Deployment는 같은 ARM64 image digest를 쓰며 worker는 HTTP port나 Service를 노출하지 않습니다. Deployment 전에는 storage apply와 Vault staging key 준비가 끝나 있어야 합니다.
-8. API는 기존 `/v1` inline 경로를 유지하고 Temporal 설정이 있을 때 `/v2`를 활성화합니다. Worker 장애는 `/v2` 처리에만 영향을 줍니다. API와 worker는 요청 CPU 100m / memory 256Mi, 제한 CPU 1 / memory 1Gi를 사용합니다. Staging은 영속 볼륨을 쓰지 않으며 Workflow가 Temporal 재시도로 cleanup activity를 실행하고, 남은 원본은 `uploads/` 24시간 lifecycle rule이 backstop으로 정리합니다.
+1. 위 Tailscale 변수와 외부 workload identity 정책을 준비한 뒤 Kubernetes repository의 Terraform 변경을 적용해 Media GitHub OIDC identity에 Argo CD `media` project 접근 권한을 줍니다. 이어서 이 repository의 Terraform을 적용해 `helm/` chart를 `media` namespace에 배포하는 `media` Application을 만듭니다. 처음에는 자동 동기화가 꺼져 있습니다.
+2. Worker 배포 전에 Kubernetes repository의 PR 145 NetworkPolicy 변경을 적용합니다. 이 network rule은 `media` namespace에서 Temporal frontend의 TCP 7233으로 연결할 수 있게 합니다. 이는 frontend network reachability만 허용하며 Temporal namespace authorization을 설정하지 않습니다. 다른 namespace나 port 허용은 추가하지 않습니다.
+3. Chart의 PreSync Job은 `media` Temporal namespace를 30일 retention으로 생성하거나 조정합니다. Temporal CLI는 cluster server와 같은 `1.31.2` admin-tools image를 사용하고 TLS와 config file/env 설정을 끕니다. NetworkPolicy를 먼저 적용해야 합니다.
+4. PR 13 storage 변경을 적용해 private `byulmaru-media-staging` bucket과 `uploads/` prefix의 48시간 lifecycle backstop, 미완료 multipart upload의 24시간 abort rule을 준비합니다. Terraform workflow와 Media Deploy workflow는 별개라 같은 push에서 실행 순서가 보장되지 않습니다. Vault Secrets Operator와 `vso-kubernetes-sync` Kubernetes auth role을 준비하고 KV v2 `secret/kubernetes/media`에 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `R2_STAGING_ACCESS_KEY_ID`, `R2_STAGING_SECRET_ACCESS_KEY`를 저장합니다. `API_KEY`는 호출자가 사용하는 값이어야 합니다. staging key에는 private bucket의 object read/write 권한만 주고 Helm values나 image에는 credentials를 넣지 않습니다.
+5. Chart의 기본 API host는 `media-api.byulmaru.co`이며 `host` 값이 HTTPRoute hostname과 `PUBLIC_API_BASE_URL`을 함께 정합니다. HTTPRoute는 `gateway/public` Gateway를 사용합니다. Cloudflare에 이 host의 proxied A record를 public Gateway EIP (`aws_eip.public_gateway_nlb.public_ip` in Kubernetes Terraform)로 한 번 추가해야 합니다. 이 repository는 DNS를 관리하지 않으며 공개 이미지 URL `media.byulma.run`은 그대로 사용합니다.
+6. Nexus endpoint 이름 `media-upload`는 cluster-global registry에 운영자가 한 번 등록합니다. Chart는 endpoint를 자동 생성하거나 수정하지 않습니다. Endpoint는 namespace `media`, task queue `media-upload`를 가리켜야 하며 `media` Temporal namespace가 준비된 뒤 설정합니다. Temporal frontend에 연결 가능한 권한 있는 host에서 먼저 확인합니다.
+
+   ```sh
+   temporal operator nexus endpoint get \
+     --name media-upload \
+     --address temporal-frontend.temporal.svc.cluster.local:7233 \
+     --tls=false \
+     --disable-config-env \
+     --disable-config-file \
+     --client-connect-timeout 10s \
+     --command-timeout 20s
+   ```
+
+   위 조회가 명시적으로 `NOT FOUND`를 반환한 경우에만 생성합니다. 연결, TLS, 권한 오류는 endpoint 부재를 뜻하지 않으므로 접근 문제를 먼저 해결합니다.
+
+   ```sh
+   temporal operator nexus endpoint create \
+     --name media-upload \
+     --target-namespace media \
+     --target-task-queue media-upload \
+     --address temporal-frontend.temporal.svc.cluster.local:7233 \
+     --tls=false \
+     --disable-config-env \
+     --disable-config-file \
+     --client-connect-timeout 10s \
+     --command-timeout 20s
+   ```
+
+   기존 endpoint가 이 target과 같으면 그대로 둡니다. 다른 곳을 가리키면 소유자와 조율하고 이 배포에서 retarget하지 않습니다.
+7. 첫 성공한 ARM64 게시 후 Deploy workflow가 source SHA, `version`, `imageDigest`를 함께 설정하고 자동 동기화, prune, self-heal을 켭니다. Chart의 기본 image reference는 기존 AMD64 seed이므로 첫 게시 전에는 수동 sync하지 않습니다. Deploy workflow는 Application의 목표 SHA/version/digest와 관찰된 sync SHA가 맞고 sync가 `Synced`, health가 `Healthy`일 때 성공합니다. API와 Worker는 같은 ARM64 image digest를 사용하며 Worker는 HTTP port나 Service를 노출하지 않습니다.
+8. API는 기존 `/v1` inline 경로를 유지합니다. Worker는 `media-upload` task queue에서 Nexus operation을 처리합니다. 두 Deployment는 영속 볼륨 없이 기존 R2 bucket을 사용합니다. Staging workflow는 원본 `LastModified`부터 24시간 안에 게시를 기다리고, 남은 `uploads/` 원본은 48시간 lifecycle rule이 backstop으로 정리합니다. API와 Worker는 CPU 100m / memory 256Mi를 요청하고 CPU 1 / memory 1Gi로 제한합니다. 서버는 SIGTERM 때 요청을 drain하지 않아 pod 교체가 진행 중인 upload를 끊을 수 있습니다.

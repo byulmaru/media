@@ -40,6 +40,8 @@ spec:
           env:
             - name: R2_ENDPOINT
               value: {{ .Values.config.r2Endpoint | quote }}
+            - name: PUBLIC_BASE_URL
+              value: {{ .Values.config.publicBaseUrl | quote }}
             - name: R2_BUCKET_NAME
               value: {{ .Values.config.r2BucketName | quote }}
             - name: R2_STAGING_BUCKET_NAME
@@ -50,8 +52,25 @@ spec:
               value: {{ .Values.temporal.namespace | quote }}
             - name: TEMPORAL_TASK_QUEUE
               value: {{ .Values.temporal.taskQueue | quote }}
-          envFrom:
-            - secretRef:
-                name: env
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: R2_STAGING_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: R2_STAGING_ACCESS_KEY_ID
+            - name: R2_STAGING_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: R2_STAGING_SECRET_ACCESS_KEY
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

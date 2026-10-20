@@ -7,15 +7,19 @@ import { transcodeOriginal } from "../codec";
 import { initializeNodeCodec } from "../codec.node";
 import type { MediaStorage } from "../storage";
 import type { UploadStagingStorage } from "../storage/staging";
-import type { ProcessUploadInput, UploadSourceCleanupInput } from "./types";
+import type {
+  ProcessUploadInput,
+  ProcessUploadResult,
+  UploadSourceCleanupInput,
+} from "./types";
 import {
   UPLOAD_PROCESSING_INPUT_ERROR_TYPE,
+  UPLOAD_SOURCE_ERROR_TYPE,
   UPLOAD_VALIDATION_CODES,
   UPLOAD_VALIDATION_ERROR_TYPE,
 } from "./types";
 import { parseProcessUploadInput, parseUploadSourceCleanupInput } from "./validation";
 
-const acceptedContentTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 const validationCodes: ReadonlySet<string> = new Set(UPLOAD_VALIDATION_CODES);
 
 function asNonRetryableValidationFailure(error: unknown): ApplicationFailure | undefined {
@@ -48,23 +52,44 @@ function invalidProcessingInput(): ApplicationFailure {
   });
 }
 
+function invalidUploadSource(): ApplicationFailure {
+  return ApplicationFailure.create({
+    message: "upload source metadata is missing or invalid",
+    type: UPLOAD_SOURCE_ERROR_TYPE,
+    nonRetryable: true,
+  });
+}
+
 export function createUploadProcessingActivities(
   staging: UploadStagingStorage,
   media: MediaStorage,
+  publicBaseUrl: string,
 ) {
   return {
-    async processUploadImage(rawInput: ProcessUploadInput): Promise<void> {
+    async getUploadSourceLastModified(rawInput: ProcessUploadInput): Promise<number> {
+      const input = parseProcessUploadInput(rawInput);
+      if (!input) throw invalidProcessingInput();
+
+      const lastModified = await staging.headLastModified(input.sourceKey);
+      if (!(lastModified instanceof Date) || !Number.isFinite(lastModified.getTime())) {
+        throw invalidUploadSource();
+      }
+      return lastModified.getTime();
+    },
+
+    async processUploadImage(rawInput: ProcessUploadInput): Promise<ProcessUploadResult> {
       const input = parseProcessUploadInput(rawInput);
       if (!input) throw invalidProcessingInput();
 
       const outputKey = `original/${input.id}.webp`;
-      if (await media.head(outputKey)) return;
+      const result: ProcessUploadResult = {
+        id: input.id,
+        url: `${publicBaseUrl}/${outputKey}`,
+        mediaType: "image/webp",
+      };
+      if (await media.head(outputKey)) return result;
 
       try {
-        if (!acceptedContentTypes.has(input.contentType)) {
-          throw new HttpError(415, "unsupported_image", "Content-Type must be JPEG, PNG, or WebP");
-        }
-
         let bytes: ArrayBuffer;
         try {
           bytes = await staging.get(input.sourceKey, input.maxBytes);
@@ -111,6 +136,7 @@ export function createUploadProcessingActivities(
         if (!stored && !(await media.head(outputKey))) {
           throw new Error("conditional media write could not be confirmed");
         }
+        return result;
       } catch (error) {
         throw asNonRetryableValidationFailure(error) ?? error;
       }

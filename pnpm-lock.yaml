@@ -27,20 +27,26 @@ importers:
         specifier: ^1.5.0
         version: 1.5.0
       '@temporalio/activity':
-        specifier: 1.22.0
-        version: 1.22.0
+        specifier: 1.23.0
+        version: 1.23.0
       '@temporalio/client':
-        specifier: 1.22.0
-        version: 1.22.0
+        specifier: 1.23.0
+        version: 1.23.0
+      '@temporalio/nexus':
+        specifier: 1.23.0
+        version: 1.23.0
       '@temporalio/worker':
-        specifier: 1.22.0
-        version: 1.22.0(esbuild@0.28.1)
+        specifier: 1.23.0
+        version: 1.23.0(esbuild@0.28.1)
       '@temporalio/workflow':
-        specifier: 1.22.0
-        version: 1.22.0
+        specifier: 1.23.0
+        version: 1.23.0
       hono:
         specifier: ^4.10.8
         version: 4.12.30
+      nexus-rpc:
+        specifier: 0.0.3
+        version: 0.0.3
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -52,8 +58,8 @@ importers:
         specifier: ^5.20260716.1
         version: 5.20260716.1
       '@temporalio/testing':
-        specifier: 1.22.0
-        version: 1.22.0(esbuild@0.28.1)
+        specifier: 1.23.0
+        version: 1.23.0(esbuild@0.28.1)
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3
@@ -987,40 +993,40 @@ packages:
   '@swc/types@0.1.28':
     resolution: {integrity: sha512-V6Mnml8v09QALx6K0elJ7o9K/MkVDtW3t6L+7Ou/JcWtb3xwId2AH4FeOceySd2JaO87IMw4+6vSZxLm34LPbw==}
 
-  '@temporalio/activity@1.22.0':
-    resolution: {integrity: sha512-hrPeELIMloFWVrwmDfG1lh3uFNkaYp1ZHpcpWmJniTeSyxqCqLdil4lBOv11FByb6HeKxE6rsvOOUohulyVhRg==}
+  '@temporalio/activity@1.23.0':
+    resolution: {integrity: sha512-BVeiizVD08yk0Ls6MhKCK+g3fPIWbVM9MLx+o990KwhCaZtRM6o1+du1/qfIIShHl6YjHk+H0ewkx2x14QQ6bA==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/client@1.22.0':
-    resolution: {integrity: sha512-b02ty0uDly6/ZRKlbavs5GjXVTry/GB4tkq0v1NH4H7x+nTo/OK0u5Ms8Nni8D+aar3xff9lzIpXNwu/Dp3P3w==}
+  '@temporalio/client@1.23.0':
+    resolution: {integrity: sha512-E9nXZPiKDGEDbPpRi0EyQ9i1x70fEIG26aMXZO88kKslKZnEKNPphs06xIic7bhuDoSrPsgVfdDap6o3l6IO2A==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/common@1.22.0':
-    resolution: {integrity: sha512-1NpQpo/y6XU1ULbo/bXgBEhl6qQnOeB79NrsSJdjI38/hfXPom2IYGJcIxOFfsQICQ0zePEKzB9Yyo31KNpIxA==}
+  '@temporalio/common@1.23.0':
+    resolution: {integrity: sha512-TaZYb/ruzgzJ8jd42EqRUCI4ispLZETt2Jigc9szES6q9edDmfncRw143HyvPi7b8n9naohYmA/IxTe9COH/dg==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/core-bridge@1.22.0':
-    resolution: {integrity: sha512-mJ5agqtfW+GBPYl+ivYLrBpKJ3oFOw8ogcoizNrxYCzwJeprGFiEgHDb/jzyvECR4HAy5s9zQFJYNyTruXXFMw==}
+  '@temporalio/core-bridge@1.23.0':
+    resolution: {integrity: sha512-sid14odlYnci9WgB+iDLyxFbzkq+qBbRPp+CW9U1v+DLRfHlFJwpznQ1AZl4mHjtAZRGQFvDsDG0XNncl9ESSA==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/nexus@1.22.0':
-    resolution: {integrity: sha512-4S1ZZdSNjrO9IUyhWxweIidvNn1X/ihEl+P2fOn/Ky38YRx9G+8wtV6g6lqG8zUrtEv//uqFw+HsRMziE2y4tg==}
+  '@temporalio/nexus@1.23.0':
+    resolution: {integrity: sha512-mObGNp3thR+mTXdtKXpUvFpsdjEI9xpVjewhblKXao7Nqv6xrs7RpFiLdKfJhkEvDyfRgIk/dH5RkiCbZ58I9w==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/proto@1.22.0':
-    resolution: {integrity: sha512-X7NVa0Z6HK3l9irZR48FKwZ9w9YXetCdF2z2KCIRr0W7Kul64Wt9o5hwvSXShAtrZuCEEHH8WO/ffHTXxJieLg==}
+  '@temporalio/proto@1.23.0':
+    resolution: {integrity: sha512-90JWnYEs1wyq97/SXkQGknRVMr/BCV9sZ0pOnK3fHTedVinfvz3/PBVFkeAJyU3CJqMQGnzRs9IIfsBTT1icrA==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/testing@1.22.0':
-    resolution: {integrity: sha512-LWIVkJZHLKsuuXLeTZ9VuN6Sjt79BJTl9KKTQ84dOysPj+tMGTET8TEZasBhCuocS0qFGrh00c5e4RzXjfnLLA==}
+  '@temporalio/testing@1.23.0':
+    resolution: {integrity: sha512-4e52YlZ+u6rCoDwsWJpDLfNwEoM2PM0KQXhbAOWc4DE2QsIuSD5ZrecQs4Ud7Z1BBzMTcFDmIyCjGw/O852QTw==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/worker@1.22.0':
-    resolution: {integrity: sha512-axRHhUsovFlqDtXZxUnhRLV7WmC6qOMUCij13lw4glT5yRH62k8wIZqcT3naEfvLSzoDxjt2xM7me3VvTRSaow==}
+  '@temporalio/worker@1.23.0':
+    resolution: {integrity: sha512-k1MrK10lD1s7U66PFqAwGlQMRsVrfU5nCB+CjIAg5RyL7JpOzidDCz/E/jB2HobXzZnxtMcDBfBHh/BYUoyhxw==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/workflow@1.22.0':
-    resolution: {integrity: sha512-31Ax529+TvfH2RCexOhiCyM3lARJJoVzrnRUS1gX+jl+mka+pRRnEUx4B572mZz0oOlCCxbiztHZF72wwwWZDA==}
+  '@temporalio/workflow@1.23.0':
+    resolution: {integrity: sha512-dHQnYmxU/QN7VfTmdfCfpdfTS1w0hoW/NQ7Zefr55QnqLwZw+E0Vn6S4fAbJrpfHrsAmezUZQFVLi+Z4Sq+jzA==}
     engines: {node: '>= 20.3.0'}
 
   '@types/chai@5.2.3':
@@ -1412,8 +1418,8 @@ packages:
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
-  nexus-rpc@0.0.2:
-    resolution: {integrity: sha512-IWjIExdVYlmwXuzHdY/Q3lXCv1gbqoAXPazQhy2w4Xgtgha3H0OOujEESVPQcFUFMWm+pAk2gKnb57g8S41JZg==}
+  nexus-rpc@0.0.3:
+    resolution: {integrity: sha512-ksIBeYHDv6FHAR1h3Vwk0kQ6REhdo1STqDHXMzu/yn/VN/XzgOor2IUjewG6paoA7IgxlIPZoOU/PD78PC6HTg==}
     engines: {node: '>= 20.0.0'}
 
   node-releases@2.0.59:
@@ -1441,12 +1447,12 @@ packages:
     resolution: {integrity: sha512-Mz8SaolMd8nB+G13WkORcxQKHZ/NE4xXevtkJHVuG+guo9/wYKlIMTKAqGdEmYOXR2ijPjTYNHssizdaVSUNdQ==}
     engines: {node: ^10 || ^12 || >=14}
 
-  proto3-json-serializer@2.0.2:
-    resolution: {integrity: sha512-SAzp/O4Yh02jGdRc+uIrGoe87dkN/XtwxfZ4ZyafJHymd79ozp5VG5nyZ7ygqPM5+cpLDjjGnYFUkngonyDPOQ==}
-    engines: {node: '>=14.0.0'}
-
   protobufjs@7.6.6:
     resolution: {integrity: sha512-dYDWdjSl5RNb7SgPxGQcRU+GtvP7s2fpkrY0r432PcOIaZ0/rBcxEZnQN67iJhFuQiVw754JDoPruPCNdGsbjg==}
+    engines: {node: '>=12.0.0'}
+
+  protobufjs@8.8.1:
+    resolution: {integrity: sha512-d9e9179bjXSJdpJ3+R9fP8hzXsnKLyxTjHLG1dUzje8a27pPyXCe6PrcRtgx2rjoM3IZzHd2vAs+6J/BsO1k7Q==}
     engines: {node: '>=12.0.0'}
 
   require-directory@2.1.1:
@@ -2547,56 +2553,56 @@ snapshots:
     dependencies:
       '@swc/counter': 0.1.3
 
-  '@temporalio/activity@1.22.0':
+  '@temporalio/activity@1.23.0':
     dependencies:
-      '@temporalio/client': 1.22.0
-      '@temporalio/common': 1.22.0
+      '@temporalio/client': 1.23.0
+      '@temporalio/common': 1.23.0
 
-  '@temporalio/client@1.22.0':
+  '@temporalio/client@1.23.0':
     dependencies:
       '@grpc/grpc-js': 1.14.6
-      '@temporalio/common': 1.22.0
-      '@temporalio/proto': 1.22.0
+      '@temporalio/common': 1.23.0
+      '@temporalio/proto': 1.23.0
       abort-controller: 3.0.0
       long: 5.3.2
-      nexus-rpc: 0.0.2
+      nexus-rpc: 0.0.3
       uuid: 11.1.1
 
-  '@temporalio/common@1.22.0':
+  '@temporalio/common@1.23.0':
     dependencies:
-      '@temporalio/proto': 1.22.0
+      '@temporalio/proto': 1.23.0
       long: 5.3.2
       ms: 3.0.0-canary.1
-      nexus-rpc: 0.0.2
-      proto3-json-serializer: 2.0.2
+      nexus-rpc: 0.0.3
+      protobufjs: 8.8.1
 
-  '@temporalio/core-bridge@1.22.0':
+  '@temporalio/core-bridge@1.23.0':
     dependencies:
       '@grpc/grpc-js': 1.14.6
-      '@temporalio/common': 1.22.0
+      '@temporalio/common': 1.23.0
 
-  '@temporalio/nexus@1.22.0':
+  '@temporalio/nexus@1.23.0':
     dependencies:
-      '@temporalio/client': 1.22.0
-      '@temporalio/common': 1.22.0
-      '@temporalio/proto': 1.22.0
+      '@temporalio/client': 1.23.0
+      '@temporalio/common': 1.23.0
+      '@temporalio/proto': 1.23.0
       long: 5.3.2
-      nexus-rpc: 0.0.2
+      nexus-rpc: 0.0.3
 
-  '@temporalio/proto@1.22.0':
+  '@temporalio/proto@1.23.0':
     dependencies:
       long: 5.3.2
-      protobufjs: 7.6.6
+      protobufjs: 8.8.1
 
-  '@temporalio/testing@1.22.0(esbuild@0.28.1)':
+  '@temporalio/testing@1.23.0(esbuild@0.28.1)':
     dependencies:
-      '@temporalio/activity': 1.22.0
-      '@temporalio/client': 1.22.0
-      '@temporalio/common': 1.22.0
-      '@temporalio/core-bridge': 1.22.0
-      '@temporalio/proto': 1.22.0
-      '@temporalio/worker': 1.22.0(esbuild@0.28.1)
-      '@temporalio/workflow': 1.22.0
+      '@temporalio/activity': 1.23.0
+      '@temporalio/client': 1.23.0
+      '@temporalio/common': 1.23.0
+      '@temporalio/core-bridge': 1.23.0
+      '@temporalio/proto': 1.23.0
+      '@temporalio/worker': 1.23.0(esbuild@0.28.1)
+      '@temporalio/workflow': 1.23.0
     transitivePeerDependencies:
       - '@minify-html/node'
       - '@napi-rs/image'
@@ -2616,21 +2622,21 @@ snapshots:
       - uglify-js
       - webpack-cli
 
-  '@temporalio/worker@1.22.0(esbuild@0.28.1)':
+  '@temporalio/worker@1.23.0(esbuild@0.28.1)':
     dependencies:
       '@grpc/grpc-js': 1.14.6
       '@swc/core': 1.16.18
-      '@temporalio/activity': 1.22.0
-      '@temporalio/client': 1.22.0
-      '@temporalio/common': 1.22.0
-      '@temporalio/core-bridge': 1.22.0
-      '@temporalio/nexus': 1.22.0
-      '@temporalio/proto': 1.22.0
-      '@temporalio/workflow': 1.22.0
+      '@temporalio/activity': 1.23.0
+      '@temporalio/client': 1.23.0
+      '@temporalio/common': 1.23.0
+      '@temporalio/core-bridge': 1.23.0
+      '@temporalio/nexus': 1.23.0
+      '@temporalio/proto': 1.23.0
+      '@temporalio/workflow': 1.23.0
       heap-js: 2.7.1
       memfs: 4.80.0
-      nexus-rpc: 0.0.2
-      protobufjs: 7.6.6
+      nexus-rpc: 0.0.3
+      protobufjs: 8.8.1
       rxjs: 7.8.2
       source-map: 0.7.6
       source-map-loader: 5.0.0(webpack@5.112.0(@swc/core@1.16.18)(esbuild@0.28.1))
@@ -2657,11 +2663,11 @@ snapshots:
       - uglify-js
       - webpack-cli
 
-  '@temporalio/workflow@1.22.0':
+  '@temporalio/workflow@1.23.0':
     dependencies:
-      '@temporalio/common': 1.22.0
-      '@temporalio/proto': 1.22.0
-      nexus-rpc: 0.0.2
+      '@temporalio/common': 1.23.0
+      '@temporalio/proto': 1.23.0
+      nexus-rpc: 0.0.3
 
   '@types/chai@5.2.3':
     dependencies:
@@ -3028,7 +3034,7 @@ snapshots:
 
   nanoid@3.3.16: {}
 
-  nexus-rpc@0.0.2: {}
+  nexus-rpc@0.0.3: {}
 
   node-releases@2.0.59: {}
 
@@ -3048,10 +3054,6 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  proto3-json-serializer@2.0.2:
-    dependencies:
-      protobufjs: 7.6.6
-
   protobufjs@7.6.6:
     dependencies:
       '@protobufjs/aspromise': 1.1.2
@@ -3064,6 +3066,10 @@ snapshots:
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
       '@types/node': 24.13.3
+      long: 5.3.2
+
+  protobufjs@8.8.1:
+    dependencies:
       long: 5.3.2
 
   require-directory@2.1.1: {}

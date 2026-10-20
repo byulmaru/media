@@ -1,13 +1,14 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
-  PutObjectCommand,
+  HeadObjectCommand,
   S3Client,
+  S3ServiceException,
 } from "@aws-sdk/client-s3";
 import type { R2S3StorageConfig } from "./r2-s3";
 
 export interface UploadStagingStorage {
-  put(key: string, bytes: ArrayBuffer): Promise<void>;
+  headLastModified(key: string): Promise<Date | null>;
   get(key: string, maxBytes: number): Promise<ArrayBuffer>;
   delete(key: string): Promise<void>;
 }
@@ -18,15 +19,18 @@ export class R2S3StagingStorage implements UploadStagingStorage {
     private readonly bucketName: string,
   ) {}
 
-  async put(key: string, bytes: ArrayBuffer): Promise<void> {
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.bucketName,
-        Key: key,
-        Body: new Uint8Array(bytes),
-        IfNoneMatch: "*",
-      }),
-    );
+  async headLastModified(key: string): Promise<Date | null> {
+    try {
+      const object = await this.client.send(
+        new HeadObjectCommand({ Bucket: this.bucketName, Key: key }),
+      );
+      return object.LastModified ?? null;
+    } catch (error) {
+      if (error instanceof S3ServiceException && error.$metadata.httpStatusCode === 404) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async get(key: string, maxBytes: number): Promise<ArrayBuffer> {

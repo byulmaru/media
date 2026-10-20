@@ -4,14 +4,8 @@ import { request as httpRequest } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { test } from "node:test";
 
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  HeadObjectCommand,
-  PutObjectCommand,
-  S3ServiceException,
-} from "@aws-sdk/client-s3";
-import { R2S3MediaStorage, R2S3StagingStorage, startServer } from "../dist/server.js";
+import { HeadObjectCommand, PutObjectCommand, S3ServiceException } from "@aws-sdk/client-s3";
+import { R2S3MediaStorage, startServer } from "../dist/server.js";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -181,45 +175,6 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
 
 });
 
-test("private staging adapter uses conditional puts and bounds streamed reads", async () => {
-  const commands = [];
-  let contentLength = 3;
-  const staging = new R2S3StagingStorage(
-    {
-      async send(command) {
-        commands.push(command);
-        if (command instanceof GetObjectCommand) {
-          return {
-            ContentLength: contentLength,
-            Body: (async function* () {
-              yield Uint8Array.from([1, 2]);
-              yield Uint8Array.from([3]);
-            })(),
-          };
-        }
-        return {};
-      },
-    },
-    "byulmaru-media-staging",
-  );
-  const input = Uint8Array.from([4, 5]).buffer;
-
-  await staging.put("uploads/u_test", input);
-  assert(commands[0] instanceof PutObjectCommand);
-  assert.equal(commands[0].input.Bucket, "byulmaru-media-staging");
-  assert.equal(commands[0].input.IfNoneMatch, "*");
-  assert.deepEqual(new Uint8Array(commands[0].input.Body), new Uint8Array(input));
-
-  const read = await staging.get("uploads/u_test", 3);
-  assert.deepEqual([...new Uint8Array(read)], [1, 2, 3]);
-  contentLength = undefined;
-  await assert.rejects(staging.get("uploads/u_large", 2), /exceeds maxBytes/);
-
-  await staging.delete("uploads/u_test");
-  assert(commands.at(-1) instanceof DeleteObjectCommand);
-  assert.equal(commands.at(-1).input.Key, "uploads/u_test");
-});
-
 class MemoryMediaStorage {
   objects = new Map();
 
@@ -283,22 +238,6 @@ test("built Node server converts a PNG over HTTP and preserves upload semantics"
     await once(server, "listening");
     const address = server.address();
     assert(address && typeof address === "object");
-
-    const unavailable = await sendHttp(address.port, "/v2/uploads", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer test-api-key",
-        "Content-Type": "application/json",
-      },
-      body: Buffer.from("{}"),
-    });
-    assert.equal(unavailable.statusCode, 503);
-    assert.deepEqual(JSON.parse(unavailable.body.toString("utf8")), {
-      error: {
-        code: "processing_unavailable",
-        message: "upload processing is unavailable",
-      },
-    });
 
     const created = await sendHttp(address.port, "/v1/uploads", {
       method: "POST",
@@ -366,145 +305,6 @@ test("built Node server converts a PNG over HTTP and preserves upload semantics"
       url: `https://media.byulma.run/${key}`,
       mediaType: "image/webp",
     });
-  } finally {
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  }
-});
-
-test("Node v2 HTTP route validates uploads before invoking its injected processor", async () => {
-  const storage = new MemoryMediaStorage();
-  const calls = [];
-  const processor = async (input) => {
-    calls.push({
-      id: input.id,
-      bytes: [...new Uint8Array(input.bytes)],
-      contentType: input.contentType,
-      limits: input.limits,
-    });
-  };
-  const port = await findAvailablePort();
-  const server = await startServer({ ...appEnv, PORT: String(port) }, storage, processor);
-  try {
-    await once(server, "listening");
-    const address = server.address();
-    assert(address && typeof address === "object");
-
-    const created = await sendHttp(address.port, "/v2/uploads", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer test-api-key",
-        "Content-Type": "application/json",
-      },
-      body: Buffer.from("{}"),
-    });
-    assert.equal(created.statusCode, 201);
-    const ticket = JSON.parse(created.body.toString("utf8"));
-    assert.equal(new URL(ticket.uploadUrl).origin, appEnv.PUBLIC_API_BASE_URL);
-    assert.match(new URL(ticket.uploadUrl).pathname, /^\/v2\/uploads\//);
-    const uploadPath = new URL(ticket.uploadUrl).pathname;
-
-    const blockedOrigin = await sendHttp(address.port, uploadPath, {
-      method: "PUT",
-      headers: { Origin: "https://evil.example", "Content-Type": "image/png" },
-      body: PNG_1X1,
-    });
-    assert.equal(blockedOrigin.statusCode, 403);
-    const invalidToken = await sendHttp(address.port, `${uploadPath}x`, {
-      method: "PUT",
-      headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
-      body: PNG_1X1,
-    });
-    assert.equal(invalidToken.statusCode, 401);
-    const invalidMime = await sendHttp(address.port, uploadPath, {
-      method: "PUT",
-      headers: { Origin: "https://app.example.com", "Content-Type": "image/jpeg" },
-      body: PNG_1X1,
-    });
-    assert.equal(invalidMime.statusCode, 415);
-    assert.equal(calls.length, 0);
-
-    const small = await sendHttp(address.port, "/v2/uploads", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer test-api-key",
-        "Content-Type": "application/json",
-      },
-      body: Buffer.from(JSON.stringify({ maxBytes: 1 })),
-    });
-    assert.equal(small.statusCode, 201);
-    const smallTicket = JSON.parse(small.body.toString("utf8"));
-    const oversized = await sendHttp(address.port, new URL(smallTicket.uploadUrl).pathname, {
-      method: "PUT",
-      headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
-      body: PNG_1X1,
-    });
-    assert.equal(oversized.statusCode, 413);
-    assert.equal(calls.length, 0);
-
-    const preflight = await sendHttp(address.port, uploadPath, {
-      method: "OPTIONS",
-      headers: {
-        Origin: "https://app.example.com",
-        "Access-Control-Request-Method": "PUT",
-      },
-    });
-    assert.equal(preflight.statusCode, 204);
-    assert.equal(preflight.headers["access-control-allow-origin"], "https://app.example.com");
-    assert.equal(preflight.headers["access-control-allow-methods"], "PUT, OPTIONS");
-
-    const uploaded = await sendHttp(address.port, uploadPath, {
-      method: "PUT",
-      headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
-      body: PNG_1X1,
-    });
-    assert.equal(uploaded.statusCode, 201);
-    assert.equal(uploaded.headers["access-control-allow-origin"], "https://app.example.com");
-    assert.deepEqual(JSON.parse(uploaded.body.toString("utf8")), {
-      id: ticket.id,
-      url: `https://media.byulma.run/original/${ticket.id}.webp`,
-    });
-    assert.deepEqual(calls, [{
-      id: ticket.id,
-      bytes: [...PNG_1X1],
-      contentType: "image/png",
-      limits: { maxBytes: 16 * 1024 * 1024, maxDimension: 8192 },
-    }]);
-
-    const pending = await sendHttp(address.port, `/v2/uploads/${ticket.id}`, {
-      headers: { Authorization: "Bearer test-api-key" },
-    });
-    assert.equal(pending.statusCode, 404);
-    const pendingHead = await sendHttp(address.port, `/v2/uploads/${ticket.id}`, {
-      method: "HEAD",
-      headers: { Authorization: "Bearer test-api-key" },
-    });
-    assert.equal(pendingHead.statusCode, 404);
-
-    storage.objects.set(`original/${ticket.id}.webp`, {
-      bytes: Buffer.alloc(0),
-      httpMetadata: { contentType: "image/webp" },
-    });
-    const completed = await sendHttp(address.port, `/v2/uploads/${ticket.id}`, {
-      headers: { Authorization: "Bearer test-api-key" },
-    });
-    assert.equal(completed.statusCode, 200);
-    assert.deepEqual(JSON.parse(completed.body.toString("utf8")), {
-      url: `https://media.byulma.run/original/${ticket.id}.webp`,
-      mediaType: "image/webp",
-    });
-    const completedHead = await sendHttp(address.port, `/v2/uploads/${ticket.id}`, {
-      method: "HEAD",
-      headers: { Authorization: "Bearer test-api-key" },
-    });
-    assert.equal(completedHead.statusCode, 204);
-
-    const duplicate = await sendHttp(address.port, uploadPath, {
-      method: "PUT",
-      headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
-      body: PNG_1X1,
-    });
-    assert.equal(duplicate.statusCode, 409);
-    assert.equal(calls.length, 1);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
