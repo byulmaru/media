@@ -1,0 +1,5 @@
+apiVersion: v2
+name: media
+description: byulmaru media Node.js upload API
+type: application
+version: 0.1.0

@@ -2,7 +2,6 @@ name: CI
 
 on:
   pull_request:
-  push:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -26,30 +25,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm test:server
-      - run: docker build --tag byulmaru-media:ci .
       - run: pnpm dry-run
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 4.2.2
+      - run: helm lint helm/
+      - run: helm template media helm/ --namespace media
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
       - run: terraform -chdir=terraform init -backend=false
       - run: pnpm infra:fmt
       - run: pnpm infra:validate
-
-  publish:
-    needs: validate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Log in to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Build and push image
-        env:
-          IMAGE_NAME: ghcr.io/byulmaru/media
-        run: |
-          docker build --tag "$IMAGE_NAME:latest" --tag "$IMAGE_NAME:$GITHUB_SHA" .
-          docker push "$IMAGE_NAME:latest"
-          docker push "$IMAGE_NAME:$GITHUB_SHA"
