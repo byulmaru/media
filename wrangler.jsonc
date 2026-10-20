@@ -4,12 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-16",
   "compatibility_flags": ["nodejs_compat"],
-  "routes": [
-    {
-      "pattern": "media-api.byulmaru.co",
-      "custom_domain": true
-    }
-  ],
+  "routes": [],
+  "workers_dev": false,
   "vars": {
     "ALLOWED_ORIGINS": "https://kos.moe,https://dev.kos.moe,http://localhost:5173,http://localhost:5174",
     "PUBLIC_BASE_URL": "https://media.byulma.run"
