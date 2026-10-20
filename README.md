@@ -81,6 +81,17 @@ Production API는 `media-api.byulmaru.co`에서 제공하며 Kubernetes ingress�
 
 Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포함하지 않습니다.
 
+### Hope 변환 연동 (계획)
+
+아래 구조는 아직 구현되지 않았으며, Hope와의 연동은 후속 작업입니다. 현재 private upload session, 원본 `LastModified` 기준 24시간 대기, source 정리와 최종 공개는 media Worker가 소유합니다.
+
+1. 별도 Deployment와 전용 task queue에서 Hope Temporal Worker를 실행해 리소스, 동시성, 배포를 media Worker와 독립적으로 조정합니다.
+2. media Workflow는 변환이 필요할 때만 Hope Nexus operation을 호출합니다.
+3. Hope는 변환된 이미지를 private R2에 저장하고 object key/reference만 반환합니다. 이미지 bytes와 signed URL은 Temporal history에 기록하지 않습니다.
+4. media Workflow는 private 결과 reference를 이어받아 게시 요청을 계속 기다립니다. 명시적 게시 요청 뒤 공개 R2에 최종 저장하는 책임은 media에 남습니다.
+
+실제 Hope Worker 구현과 Nexus 연동, 변환 결과 반영은 후속으로 진행합니다.
+
 ## Infrastructure
 
 [Terraform](./terraform/main.tf)은 다음 Cloudflare 리소스를 관리합니다.
