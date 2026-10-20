@@ -32,13 +32,11 @@ if (config.main !== "src/index.ts") failures.push("Worker entrypoint must be src
 if (config.limits?.cpu_ms !== undefined) {
   failures.push("production must use the Cloudflare plan's default CPU limit");
 }
-const productionRoutes = config.routes ?? [];
-if (
-  productionRoutes.length !== 1 ||
-  productionRoutes[0].pattern !== "media-api.byulmaru.co" ||
-  productionRoutes[0].custom_domain !== true
-) {
-  failures.push("production must expose the Worker at media-api.byulmaru.co");
+if (config.route !== undefined || !Array.isArray(config.routes) || config.routes.length !== 0) {
+  failures.push("production Worker must not configure routes");
+}
+if (config.workers_dev !== false) {
+  failures.push("production Worker must not expose a workers.dev endpoint");
 }
 checkEnvironment("production", config, "byulmaru-media", [
   "https://kos.moe",
