@@ -21,4 +21,23 @@ describe("bounded request bodies", () => {
       code: "size_limit_exceeded",
     });
   });
+
+  it.each([
+    ["missing", {}],
+    ["understated", { headers: { "Content-Length": "1" } }],
+  ])("rejects an actually oversized stream with %s Content-Length", async (_name, init) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(DEFAULT_MAX_BYTES));
+        controller.enqueue(Uint8Array.of(0));
+        controller.close();
+      },
+    });
+    const response = new Response(body, init);
+
+    await expect(readBodyLimited(response, DEFAULT_MAX_BYTES)).rejects.toMatchObject({
+      status: 413,
+      code: "size_limit_exceeded",
+    });
+  });
 });

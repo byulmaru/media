@@ -3,7 +3,12 @@ import { Hono } from "hono";
 
 import { readBodyLimited } from "../body";
 import { transcodeOriginal } from "../codec";
-import { IMMUTABLE_CACHE_CONTROL, UPLOAD_TOKEN_TTL_SECONDS } from "../constants";
+import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_DIMENSION,
+  IMMUTABLE_CACHE_CONTROL,
+  UPLOAD_TOKEN_TTL_SECONDS,
+} from "../constants";
 import { HttpError } from "../errors";
 import { assertImageWithinLimits, inspectImage } from "../image-info";
 import { apiKeyAuth } from "../middleware/auth";
@@ -51,11 +56,27 @@ uploads.post(
   apiKeyAuth,
   zValidator("json", uploadRequestSchema, throwOnValidationError),
   async (c) => {
-    const limits = c.req.valid("json");
+    const request = c.req.valid("json");
+    if ("staging" in request && !c.env.STAGING) {
+      throw new HttpError(
+        503,
+        "staging_storage_unavailable",
+        "private upload storage is unavailable",
+      );
+    }
+    const limits = "staging" in request
+      ? { maxBytes: DEFAULT_MAX_BYTES, maxDimension: DEFAULT_MAX_DIMENSION }
+      : request;
     const id = `u_${crypto.randomUUID()}`;
     const expiresAt = Math.floor(Date.now() / 1000) + UPLOAD_TOKEN_TTL_SECONDS;
     const token = await signUploadToken(
-      { version: 1, id, expiresAt, ...limits },
+      {
+        version: "staging" in request ? 2 : 1,
+        id,
+        expiresAt,
+        maxBytes: limits.maxBytes,
+        maxDimension: limits.maxDimension,
+      },
       c.env.UPLOAD_SIGNING_SECRET,
     );
     return c.json(
@@ -86,6 +107,44 @@ uploads.get(
   }),
   async (c) => {
     const { id } = c.req.valid("param");
+    if (c.req.query("staging") === "true") {
+      c.header("Cache-Control", "no-store");
+      if (c.req.method !== "HEAD") {
+        c.header("Allow", "HEAD");
+        return c.body(null, 405);
+      }
+      if (!c.env.STAGING) {
+        throw new HttpError(
+          503,
+          "staging_storage_unavailable",
+          "private upload storage is unavailable",
+        );
+      }
+
+      const object = await c.env.STAGING.head(`uploads/${id}/${id.slice(2)}`);
+      if (!object) return c.body(null, 404);
+
+      const size = object.size;
+      if (size !== undefined && Number.isSafeInteger(size) && size >= 0) {
+        c.header("Content-Length", String(size));
+      }
+      const contentType = object.httpMetadata?.contentType;
+      let safeContentType: string | undefined;
+      if (typeof contentType === "string" && contentType.trim()) {
+        try {
+          new Headers({ "Content-Type": contentType });
+          safeContentType = contentType;
+        } catch {
+          // Omit unusable metadata so Kosmo rejects the incomplete HEAD response.
+        }
+      }
+      if (safeContentType) c.header("Content-Type", safeContentType);
+      if (object.uploaded instanceof Date && Number.isFinite(object.uploaded.getTime())) {
+        c.header("Last-Modified", object.uploaded.toUTCString());
+      }
+      return c.body(null, 200);
+    }
+
     const key = `original/${id}.webp`;
     const object = await c.env.MEDIA.head(key);
     c.header("Cache-Control", "no-store");
@@ -103,7 +162,19 @@ uploads.get(
 uploads.put("/:token", async (c) => {
   const payload = await verifyUploadToken(c.req.param("token"), c.env.UPLOAD_SIGNING_SECRET);
   const key = `original/${payload.id}.webp`;
+  const uploadStorage = payload.version === 2 ? c.env.STAGING : c.env.MEDIA;
+  if (!uploadStorage) {
+    throw new HttpError(
+      503,
+      "staging_storage_unavailable",
+      "private upload storage is unavailable",
+    );
+  }
   if (await c.env.MEDIA.head(key)) {
+    throw new HttpError(409, "already_uploaded", "upload URL has already been used");
+  }
+  const sourceKey = `uploads/${payload.id}/${payload.id.slice(2)}`;
+  if (payload.version === 2 && await uploadStorage.head(sourceKey)) {
     throw new HttpError(409, "already_uploaded", "upload URL has already been used");
   }
 
@@ -113,6 +184,15 @@ uploads.put("/:token", async (c) => {
   }
 
   const input = await readBodyLimited(c.req.raw, payload.maxBytes);
+  if (payload.version === 2) {
+    const stored = await uploadStorage.put(sourceKey, input, {
+      onlyIf: new Headers({ "If-None-Match": "*" }),
+      httpMetadata: { contentType },
+    });
+    if (!stored) throw new HttpError(409, "already_uploaded", "upload URL has already been used");
+    return c.json({ id: payload.id }, 201);
+  }
+
   const info = inspectImage(input);
   const expectedContentType = info.format === "jpeg" ? "image/jpeg" : `image/${info.format}`;
   if (contentType !== expectedContentType) {

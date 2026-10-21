@@ -15,7 +15,7 @@ HTTP 업로드 경로는 단일 스레드 WASM인 jSquash로 이미지를 변환
 
 ### Temporal Nexus 비동기 업로드
 
-호출자가 비공개 staging bucket에 원본 object를 먼저 저장한 다음, 호출 측 Temporal Workflow에서 `mediaService.startUpload`를 시작합니다. 호출 측이 upload URL이나 credentials를 관리하며, Nexus에는 object key와 이미지 제한만 전달합니다. 원본 bytes와 signed URL은 Nexus request나 Temporal history에 넣지 않습니다. Source key는 `uploads/<id>/<source-uuid>` 형식이고, `id`는 `u_<UUIDv4>`입니다.
+Kosmo는 Media API에서 비공개 staging upload URL을 발급받아 원본 object를 저장한 뒤, 호출 측 Temporal Workflow에서 `mediaService.startUpload`를 시작합니다. 다른 호출자는 staging bucket에 직접 저장할 수도 있습니다. Nexus에는 object key와 이미지 제한만 전달합니다. 원본 bytes와 signed URL은 Nexus request나 Temporal history에 넣지 않습니다. Source key는 `uploads/<id>/<source-uuid>` 형식이고, `id`는 `u_<UUIDv4>`입니다.
 
 Worker는 object metadata에서 `LastModified`를 확인하고 그 시각부터 24시간의 게시 기한을 계산합니다. Workflow는 호출 측이 게시를 요청할 때까지 durable condition으로 기다린 뒤, private object를 읽고 검증·변환하여 `original/<id>.webp`에 한 번만 저장합니다. Nexus의 `startUpload`에는 25시간 `scheduleToCloseTimeout`을 지정하며, 실제 게시 기한은 object의 `LastModified`부터 24시간입니다.
 
@@ -75,9 +75,11 @@ export async function callerWorkflow(input: ProcessUploadInput) {
 
 호출 측은 사용자의 게시 요청을 workflow signal로 기록한 뒤 `publishUpload`를 실행합니다. 게시 대기 중 만료나 처리 실패가 먼저 발생할 수 있어 `startUpload` 결과와 signal을 함께 기다립니다. 호출 측 Workflow는 Nexus 취소 handler가 대상 `startUpload` 취소를 수락할 때까지 열려 있습니다. Source 정리는 비동기라 호출 측 종료 시 완료됐다고 보장되지 않습니다. `{ id }` acknowledgement는 게시 명령이 접수됐다는 뜻이며 이미지 공개 완료를 뜻하지 않습니다. 공개 저장이 끝난 `{ id, url, mediaType }` 결과를 사용하기 전에 `startUpload` operation의 `result()`를 기다립니다. 24시간 안에 게시하지 않거나 workflow가 취소되거나 처리가 최종 실패하면 Worker가 private source를 정리합니다. 원본 삭제가 재시도 후에도 실패하면 Worker는 업로드 ID를 포함해 경고를 남기고 48시간 lifecycle 만료에 맡기며, 이 삭제 실패는 게시 결과를 덮어쓰거나 원래 Workflow 오류를 대체하지 않습니다. 게시 명령으로 처리가 시작된 뒤에는 취소나 회수 요청이 진행 중인 공개 저장을 막거나 이미 공개된 이미지를 되돌린다고 보장하지 않습니다.
 
-Worker는 Wrangler `MEDIA` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. 두 런타임은 같은 encoder와 객체 형식, metadata를 사용합니다. 점진적으로 전환할 때는 두 런타임의 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`을 맞추고, Node의 `R2_BUCKET_NAME`은 Worker의 `MEDIA` binding과 같은 `byulmaru-media` bucket을 가리키도록 설정합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
+Worker는 Wrangler `MEDIA`와 `STAGING` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. 두 런타임은 같은 encoder와 객체 형식, metadata를 사용합니다. 점진적으로 전환할 때는 두 런타임의 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`을 맞추고, Node의 `R2_BUCKET_NAME`과 `R2_STAGING_BUCKET_NAME`은 Worker의 각 binding과 같은 bucket을 가리키도록 설정합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
 
 Production API는 `media-api.byulmaru.co`에서 제공하며 Kubernetes ingress가 이 hostname을 처리합니다. Cloudflare Worker 코드와 배포는 남아 있지만, API route와 `workers.dev` endpoint는 비활성화합니다. 전환 뒤 최대 10분 동안 기존 Worker가 발급한 upload ticket이 Node.js 서버에서 실패할 수 있습니다.
+
+Kosmo의 staging metadata 확인을 출시할 때는 새 Media API를 모든 인스턴스에 먼저 배포한 뒤 Kosmo API와 Worker를 배포합니다. 롤백할 때는 Kosmo를 먼저 되돌립니다. 이전 Media API는 `staging=true`를 무시하므로 게시 전 private object를 찾지 못해 `404`를 반환할 수 있습니다.
 
 Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포함하지 않습니다.
 
@@ -138,7 +140,7 @@ pnpm exec wrangler secret put UPLOAD_SIGNING_SECRET
 
 ## Node.js server
 
-Node.js 24 서버는 같은 HTTP API와 R2 bucket을 사용합니다. R2 S3 API endpoint, bucket name, API secrets를 실행 환경 변수로 전달합니다.
+Node.js 24 서버는 같은 HTTP API와 R2 buckets를 사용합니다. R2 S3 API endpoint, public/private bucket name, API secrets를 실행 환경 변수로 전달합니다.
 
 ```sh
 pnpm build:server
@@ -153,6 +155,7 @@ pnpm start:server
 - `PUBLIC_BASE_URL`
 - `R2_ENDPOINT`: Cloudflare account의 R2 S3 API endpoint
 - `R2_BUCKET_NAME`: 기존 Worker와 같은 `byulmaru-media` bucket
+- `R2_STAGING_BUCKET_NAME`: 기존 private `byulmaru-media-staging` bucket
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `PUBLIC_API_BASE_URL`: 클라이언트가 호출하는 서버의 HTTPS public API origin. 로컬 개발에서는 `http://localhost`, `http://127.0.0.1`, `http://[::1]` origin도 허용합니다. Production에서는 Helm의 `host` 값이 이 origin을 정합니다.
@@ -221,6 +224,36 @@ Content-Type: image/png
 ```
 
 검증이나 인코딩 실패는 URL을 소비하지 않습니다. 최초 R2 저장 성공 후 같은 URL을 다시 사용하면 `409`를 반환합니다.
+
+### Create a private staging upload for Nexus
+
+Kosmo backend가 공개 저장을 시작하기 전에 원본을 private staging bucket에 저장하려면 같은 endpoint에 opt-in합니다.
+
+```http
+POST /v1/uploads
+Authorization: Bearer <API_KEY>
+Content-Type: application/json
+
+{"staging":true}
+```
+
+응답은 기본 upload와 같은 `{id, uploadUrl, expiresAt}`이며, 이 요청에는 크기 제한을 지정할 수 없습니다. `PUT`은 Content-Type과 실제 request body를 확인해 16 MiB까지 private staging에 원본 bytes를 저장하고 `{ "id": "u_..." }`를 반환합니다. private source나 공개 output이 이미 있으면 같은 upload URL의 추가 사용은 `409`입니다. 실패나 취소 뒤 private source가 정리되고 upload URL이 아직 유효하면 다시 시도할 수 있습니다. 이 경로는 공개 bucket에 쓰거나 변환하지 않습니다.
+
+Kosmo는 성공한 `PUT` 뒤 `startUpload`를 시작하고, source key `uploads/<id>/<id의 UUID>`와 Content-Type, `maxBytes: 16777216`, `maxDimension: 8192`를 전달합니다. 기존 Nexus workflow는 게시 요청까지 private source를 유지한 뒤 공개 WebP를 저장합니다. 기본 `GET`과 `HEAD /v1/uploads/<id>`는 공개 표현만 확인하므로 게시 전에는 `404`를 반환합니다. Version 2 signed token은 version 1 legacy upload와 분리되어 있어 기존 upload URL은 공개 업로드 동작을 유지합니다.
+
+Kosmo는 Media API 인증 키로 staging source metadata를 확인할 수 있습니다.
+
+```http
+HEAD /v1/uploads/u_...?staging=true
+Authorization: Bearer <API_KEY>
+```
+
+- staging object 저장됨: `200 OK`와 metadata 헤더
+- staging object 없음: `404 Not Found`
+- `STAGING` 설정 없음: `503 Service Unavailable`
+- `GET`에 `staging=true` 지정: `405 Method Not Allowed`, body 없음
+
+성공 응답은 `Cache-Control: no-store`를 사용하고, 저장된 object에서 사용할 수 있는 `Content-Length`, `Content-Type`, `Last-Modified`만 보냅니다. metadata가 없거나 유효하지 않은 값이면 해당 헤더를 생략합니다. Kosmo는 필수 metadata가 없는 응답을 terminal validation error로 처리합니다.
 
 ### Check upload completion and resolve its representation
 

@@ -28,7 +28,7 @@ export const authHeaders = {
 
 export async function createUpload(
   fetcher: Fetcher,
-  limits: Record<string, number> = {},
+  limits: Record<string, number | boolean> = {},
 ): Promise<{ id: string; uploadUrl: string; expiresAt: string }> {
   const response = await fetcher.fetch("https://media.example.com/v1/uploads", {
     method: "POST",

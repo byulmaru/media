@@ -32,11 +32,13 @@ function readNodeConfig(source: NodeJS.ProcessEnv) {
 export async function startServer(
   source: NodeJS.ProcessEnv = process.env,
   mediaStorage?: MediaStorage,
+  stagingStorage?: MediaStorage,
 ): Promise<ReturnType<typeof serve>> {
   const {
     PORT: port,
     R2_ENDPOINT: r2Endpoint,
     R2_BUCKET_NAME: bucketName,
+    R2_STAGING_BUCKET_NAME: stagingBucketName,
     API_KEY: apiKey,
     UPLOAD_SIGNING_SECRET: signingSecret,
     ALLOWED_ORIGINS: allowedOrigins,
@@ -54,8 +56,16 @@ export async function startServer(
       accessKeyId,
       secretAccessKey,
     });
+  const staging = stagingStorage ??
+    createR2S3MediaStorage({
+      endpoint: r2Endpoint,
+      bucketName: stagingBucketName,
+      accessKeyId,
+      secretAccessKey,
+    });
   const bindings: Env = {
     MEDIA: media,
+    STAGING: staging,
     API_KEY: apiKey,
     UPLOAD_SIGNING_SECRET: signingSecret,
     ALLOWED_ORIGINS: allowedOrigins,

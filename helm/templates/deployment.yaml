@@ -46,6 +46,8 @@ spec:
               value: {{ printf "https://%s" .Values.host | quote }}
             - name: R2_BUCKET_NAME
               value: {{ .Values.config.r2BucketName | quote }}
+            - name: R2_STAGING_BUCKET_NAME
+              value: {{ .Values.config.r2StagingBucketName | quote }}
             - name: R2_ENDPOINT
               value: {{ .Values.config.r2Endpoint | quote }}
             - name: API_KEY

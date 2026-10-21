@@ -51,6 +51,7 @@ export const runtimeConfigSchema = z.object({
   PUBLIC_BASE_URL: exactOriginSchema,
   PUBLIC_API_BASE_URL: publicApiBaseUrlSchema.optional(),
   MEDIA: mediaStorageSchema,
+  STAGING: mediaStorageSchema.optional(),
 });
 
 const nonWhitespaceNodeValueSchema = z.string().refine((value) => value.trim().length > 0);
@@ -71,9 +72,10 @@ export const nodeServerConfigSchema = z.object({
   PORT: digitsOnlyPortSchema,
   R2_ENDPOINT: nonWhitespaceNodeValueSchema.pipe(r2EndpointSchema),
   R2_BUCKET_NAME: nonWhitespaceNodeValueSchema,
+  R2_STAGING_BUCKET_NAME: nonWhitespaceNodeValueSchema,
   AWS_ACCESS_KEY_ID: nonWhitespaceNodeValueSchema,
   AWS_SECRET_ACCESS_KEY: nonWhitespaceNodeValueSchema,
-});
+}).refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME);
 
 export const temporalUploadConfigSchema = z.object({
   TEMPORAL_ADDRESS: nonWhitespaceNodeValueSchema,
@@ -102,7 +104,10 @@ const limits = {
     .default(DEFAULT_MAX_DIMENSION),
 };
 
-export const uploadRequestSchema = z.strictObject(limits);
+export const uploadRequestSchema = z.union([
+  z.strictObject({ staging: z.literal(true) }),
+  z.strictObject(limits),
+]);
 
 export const uploadIdParamSchema = z.strictObject({
   id: z.string().regex(

@@ -1,8 +1,28 @@
+import { z } from "zod";
+
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_DIMENSION } from "./constants";
 import { HttpError } from "./errors";
 import type { UploadTokenPayload } from "./types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const safeInteger = z.number().int().refine(Number.isSafeInteger);
+const uploadTokenPayloadSchema = z.discriminatedUnion("version", [
+  z.object({
+    version: z.literal(1),
+    id: z.string().regex(/^u_[0-9a-f-]{36}$/),
+    expiresAt: safeInteger,
+    maxBytes: safeInteger,
+    maxDimension: safeInteger,
+  }),
+  z.strictObject({
+    version: z.literal(2),
+    id: z.string().regex(/^u_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+    expiresAt: safeInteger,
+    maxBytes: z.literal(DEFAULT_MAX_BYTES),
+    maxDimension: z.literal(DEFAULT_MAX_DIMENSION),
+  }),
+]);
 
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
@@ -61,21 +81,18 @@ export async function verifyUploadToken(
     throw new HttpError(401, "invalid_upload_token", "invalid upload token");
   }
 
-  let payload: UploadTokenPayload;
+  let serializedPayload: unknown;
   try {
-    payload = JSON.parse(decoder.decode(base64UrlDecode(encodedPayload))) as UploadTokenPayload;
+    serializedPayload = JSON.parse(decoder.decode(base64UrlDecode(encodedPayload)));
   } catch {
     throw new HttpError(401, "invalid_upload_token", "invalid upload token");
   }
-  if (
-    payload.version !== 1 ||
-    !/^u_[0-9a-f-]{36}$/.test(payload.id) ||
-    !Number.isSafeInteger(payload.expiresAt) ||
-    !Number.isSafeInteger(payload.maxBytes) ||
-    !Number.isSafeInteger(payload.maxDimension)
-  ) {
+
+  const parsedPayload = uploadTokenPayloadSchema.safeParse(serializedPayload);
+  if (!parsedPayload.success) {
     throw new HttpError(401, "invalid_upload_token", "invalid upload token");
   }
+  const payload: UploadTokenPayload = parsedPayload.data;
   if (payload.expiresAt * 1000 <= now) {
     throw new HttpError(410, "upload_token_expired", "upload token expired");
   }

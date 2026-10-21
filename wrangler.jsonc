@@ -14,6 +14,10 @@
     {
       "binding": "MEDIA",
       "bucket_name": "byulmaru-media"
+    },
+    {
+      "binding": "STAGING",
+      "bucket_name": "byulmaru-media-staging"
     }
   ]
 }
