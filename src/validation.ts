@@ -85,8 +85,6 @@ export const temporalUploadConfigSchema = z.object({
   AWS_ACCESS_KEY_ID: nonWhitespaceNodeValueSchema,
   AWS_SECRET_ACCESS_KEY: nonWhitespaceNodeValueSchema,
   R2_STAGING_BUCKET_NAME: nonWhitespaceNodeValueSchema,
-  R2_STAGING_ACCESS_KEY_ID: nonWhitespaceNodeValueSchema,
-  R2_STAGING_SECRET_ACCESS_KEY: nonWhitespaceNodeValueSchema,
 }).refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME);
 
 const limits = {
