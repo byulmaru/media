@@ -32,6 +32,23 @@ resource "cloudflare_r2_bucket" "media_staging" {
   storage_class = "Standard"
 }
 
+resource "cloudflare_r2_bucket_cors" "media_staging" {
+  account_id  = var.cloudflare_account_id
+  bucket_name = cloudflare_r2_bucket.media_staging.name
+  rules = [{
+    id = "browser-upload"
+    allowed = {
+      methods = ["PUT"]
+      origins = [
+        "https://kos.moe",
+        "https://dev.kos.moe",
+        "http://localhost:5173",
+      ]
+      headers = ["Content-Type"]
+    }
+  }]
+}
+
 resource "cloudflare_r2_bucket_lifecycle" "media_staging" {
   account_id  = var.cloudflare_account_id
   bucket_name = cloudflare_r2_bucket.media_staging.name
