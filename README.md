@@ -100,7 +100,7 @@ media Workflow는 Hope queue에 변환 Activity를 예약합니다. Activity는 
 - 공개 GET/HEAD를 위한 R2 CORS
 - `byulmaru-media-staging` private R2 bucket. Nexus workflow는 게시를 기다리고, 게시 시 staging 객체를 정리합니다. 미게시 원본은 `LastModified` 후 24시간에 정리합니다. R2 lifecycle은 workflow 중단 시 남은 `uploads/` 객체를 48시간 age threshold 이후 정리하는 backstop입니다. Cloudflare는 lifecycle 만료 뒤 보통 24시간 이내에 object를 삭제하지만, 이는 보장된 최대 지연 시간이 아닙니다. 미완료 multipart upload는 24시간 age threshold에 중단됩니다.
 
-Staging bucket에는 custom domain, public CORS, `r2.dev` URL을 설정하지 않습니다.
+Staging bucket에는 public read, custom domain, `r2.dev` URL을 설정하지 않고, 브라우저 PUT CORS는 `https://kos.moe`, `https://dev.kos.moe`, `http://localhost:5173` origin에만 허용합니다.
 
 Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. `AWS_ACCESS_KEY_ID`와 `AWS_SECRET_ACCESS_KEY`는 `byulmaru-media`와 `byulmaru-media-staging` bucket의 object read/write만 허용하고, 서버의 secret store에 보관하며 이미지로 복사하지 않습니다. API와 Temporal Worker는 같은 credentials를 사용하므로 API pod에도 private staging bucket의 read/write 권한이 있습니다.
 
