@@ -108,6 +108,20 @@ export function inspectImage(buffer: ArrayBuffer): ImageInfo {
   return info;
 }
 
+export function validateImageUpload(
+  buffer: ArrayBuffer,
+  contentType: string,
+  limits: Limits,
+): ImageInfo {
+  const info = inspectImage(buffer);
+  const expectedContentType = info.format === "jpeg" ? "image/jpeg" : `image/${info.format}`;
+  if (contentType !== expectedContentType) {
+    throw new HttpError(415, "content_type_mismatch", "Content-Type does not match image bytes");
+  }
+  assertImageWithinLimits(info.width, info.height, limits);
+  return info;
+}
+
 export function assertImageWithinLimits(
   width: number,
   height: number,

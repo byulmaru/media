@@ -10,7 +10,7 @@ import {
   UPLOAD_TOKEN_TTL_SECONDS,
 } from "../constants";
 import { HttpError } from "../errors";
-import { assertImageWithinLimits, inspectImage } from "../image-info";
+import { validateImageUpload } from "../image-info";
 import { apiKeyAuth } from "../middleware/auth";
 import { signUploadToken, verifyUploadToken } from "../token";
 import type { AppEnv } from "../types";
@@ -193,12 +193,7 @@ uploads.put("/:token", async (c) => {
     return c.json({ id: payload.id }, 201);
   }
 
-  const info = inspectImage(input);
-  const expectedContentType = info.format === "jpeg" ? "image/jpeg" : `image/${info.format}`;
-  if (contentType !== expectedContentType) {
-    throw new HttpError(415, "content_type_mismatch", "Content-Type does not match image bytes");
-  }
-  assertImageWithinLimits(info.width, info.height, payload);
+  const info = validateImageUpload(input, contentType, payload);
 
   const transformStarted = Date.now();
   const output = await transcodeOriginal(input, info.format);

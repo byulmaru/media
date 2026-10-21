@@ -2,7 +2,7 @@
 
 JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 Cloudflare R2에 저장하는 업로드 서비스입니다. 같은 API를 Cloudflare Worker와 Node.js 서버로 실행할 수 있습니다. 두 런타임은 같은 R2 bucket과 `original/<id>.webp` 객체 key를 사용하므로 트래픽을 단계적으로 전환할 수 있습니다. 공개 이미지는 `https://media.byulma.run`에서 제공합니다.
 
-HTTP 업로드 경로는 단일 스레드 WASM인 jSquash로 이미지를 변환하고, Temporal 업로드 Activity는 `maxBytes` 안에서 source 전체를 읽어 검증한 뒤 Node.js Sharp pipeline으로 WebP를 인코딩해 알려진 크기와 함께 R2에 스트리밍합니다. Sharp 내부 buffering은 계속 발생하며, Sharp pipeline 오류는 비재시도 `invalid_image` 검증 오류로 분류합니다.
+기본 v1 HTTP 업로드 경로는 Worker와 Node 서버에서 jSquash codec으로 이미지를 변환해 공개 R2에 저장합니다. Version 2 private staging의 HTTP `PUT`은 원본만 private bucket에 저장합니다. Temporal Workflow가 시작되면 source를 검증하고 Sharp로 WebP를 private staging에 준비한 뒤 게시 요청을 기다립니다. 게시 Activity는 준비된 WebP bytes를 공개 R2에 그대로 승격하므로 새 Workflow는 게시 중 재인코딩하지 않습니다. 배포 전에 시작되어 patch marker가 없는 Temporal history는 replay 호환성을 위해 기존 게시 Activity를 사용하며, 준비 객체가 없으면 그 경로에서 게시 시 인코딩할 수 있습니다. Sharp 내부 buffering은 계속 발생하며, Sharp pipeline 오류는 비재시도 `invalid_image` 검증 오류로 분류합니다.
 
 ## Architecture
 
@@ -15,9 +15,9 @@ HTTP 업로드 경로는 단일 스레드 WASM인 jSquash로 이미지를 변환
 
 ### Temporal Nexus 비동기 업로드
 
-Kosmo는 Media API에서 비공개 staging upload URL을 발급받아 원본 object를 저장한 뒤, 호출 측 Temporal Workflow에서 `mediaService.startUpload`를 시작합니다. 다른 호출자는 staging bucket에 직접 저장할 수도 있습니다. Nexus에는 object key와 이미지 제한만 전달합니다. 원본 bytes와 signed URL은 Nexus request나 Temporal history에 넣지 않습니다. Source key는 `uploads/<id>/<source-uuid>` 형식이고, `id`는 `u_<UUIDv4>`입니다.
+Media API는 private staging upload URL을 발급하며, caller는 raw object를 저장한 뒤 원하는 시점에 Temporal Workflow를 시작할 수 있습니다. 다른 호출자는 staging bucket에 직접 저장할 수도 있습니다. Nexus에는 object key와 이미지 제한만 전달합니다. 원본 bytes와 signed URL은 Nexus request나 Temporal history에 넣지 않습니다. Source key는 `uploads/<id>/<source-uuid>` 형식이고, `id`는 `u_<UUIDv4>`입니다.
 
-Worker는 object metadata에서 `LastModified`를 확인하고 그 시각부터 24시간의 게시 기한을 계산합니다. Workflow는 호출 측이 게시를 요청할 때까지 durable condition으로 기다린 뒤, private object를 읽고 검증·변환하여 `original/<id>.webp`에 한 번만 저장합니다. Nexus의 `startUpload`에는 25시간 `scheduleToCloseTimeout`을 지정하며, 실제 게시 기한은 object의 `LastModified`부터 24시간입니다.
+Worker는 raw source metadata에서 `LastModified`를 확인하고 그 시각부터 24시간의 게시 기한을 계산합니다. 새 Workflow는 source를 검증하고 WebP를 private staging에 준비한 뒤, 호출 측이 게시를 요청할 때까지 durable condition으로 기다립니다. 게시 Activity는 준비한 WebP stream을 재인코딩 없이 `original/<id>.webp`에 한 번만 저장합니다. 배포 전에 시작된 markerless history만 replay 호환성을 위해 기존 게시 경로를 사용하며, 이 legacy 경로는 준비 객체가 없는 경우 게시 시점에 인코딩할 수 있습니다. 새 Workflow는 기다리기 전에 준비를 마치며 게시 중 재인코딩하지 않습니다. Nexus의 `startUpload`에는 25시간 `scheduleToCloseTimeout`을 지정하며, 실제 게시 기한은 raw source의 `LastModified`부터 24시간입니다.
 
 ```ts
 import {
@@ -73,9 +73,9 @@ export async function callerWorkflow(input: ProcessUploadInput) {
 }
 ```
 
-호출 측은 사용자의 게시 요청을 workflow signal로 기록한 뒤 `publishUpload`를 실행합니다. 게시 대기 중 만료나 처리 실패가 먼저 발생할 수 있어 `startUpload` 결과와 signal을 함께 기다립니다. 호출 측 Workflow는 Nexus 취소 handler가 대상 `startUpload` 취소를 수락할 때까지 열려 있습니다. Source 정리는 비동기라 호출 측 종료 시 완료됐다고 보장되지 않습니다. `{ id }` acknowledgement는 게시 명령이 접수됐다는 뜻이며 이미지 공개 완료를 뜻하지 않습니다. 공개 저장이 끝난 `{ id, url, mediaType }` 결과를 사용하기 전에 `startUpload` operation의 `result()`를 기다립니다. 24시간 안에 게시하지 않거나 workflow가 취소되거나 처리가 최종 실패하면 Worker가 private source를 정리합니다. 원본 삭제가 재시도 후에도 실패하면 Worker는 업로드 ID를 포함해 경고를 남기고 48시간 lifecycle 만료에 맡기며, 이 삭제 실패는 게시 결과를 덮어쓰거나 원래 Workflow 오류를 대체하지 않습니다. 게시 명령으로 처리가 시작된 뒤에는 취소나 회수 요청이 진행 중인 공개 저장을 막거나 이미 공개된 이미지를 되돌린다고 보장하지 않습니다.
+호출 측은 사용자의 게시 요청을 workflow signal로 기록한 뒤 `publishUpload`를 실행합니다. 게시 대기 중 만료나 처리 실패가 먼저 발생할 수 있어 `startUpload` 결과와 signal을 함께 기다립니다. 호출 측 Workflow는 Nexus 취소 handler가 대상 `startUpload` 취소를 수락할 때까지 열려 있습니다. Raw source와 prepared WebP 정리는 비동기라 호출 측 종료 시 완료됐다고 보장되지 않습니다. `{ id }` acknowledgement는 게시 명령이 접수됐다는 뜻이며 이미지 공개 완료를 뜻하지 않습니다. 공개 저장이 끝난 `{ id, url, mediaType }` 결과를 사용하기 전에 `startUpload` operation의 `result()`를 기다립니다. 24시간 안에 게시하지 않거나 workflow가 취소되거나 처리가 최종 실패하면 Worker가 prepared WebP를 먼저 지우고 raw source를 정리합니다. Prepared WebP 삭제가 실패하면 raw source를 보존한 채 정리 Activity를 재시도하며, 재시도 후에도 실패하면 Worker는 업로드 ID를 포함해 경고를 남기고 48시간 lifecycle 만료에 맡깁니다. 정리 실패는 게시 결과를 덮어쓰거나 원래 Workflow 오류를 대체하지 않습니다. 게시 명령으로 처리가 시작된 뒤에는 취소나 회수 요청이 진행 중인 공개 저장을 막거나 이미 공개된 이미지를 되돌린다고 보장하지 않습니다.
 
-Worker는 Wrangler `MEDIA`와 `STAGING` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. 두 런타임은 같은 encoder와 객체 형식, metadata를 사용합니다. 점진적으로 전환할 때는 두 런타임의 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`을 맞추고, Node의 `R2_BUCKET_NAME`과 `R2_STAGING_BUCKET_NAME`은 Worker의 각 binding과 같은 bucket을 가리키도록 설정합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
+Worker는 Wrangler `MEDIA`와 `STAGING` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. 두 런타임은 같은 object key, MIME type, metadata contract를 따르지만 upload path별 codec은 다릅니다. 점진적으로 전환할 때는 두 런타임의 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`을 맞추고, Node의 `R2_BUCKET_NAME`과 `R2_STAGING_BUCKET_NAME`은 Worker의 각 binding과 같은 bucket을 가리키도록 설정합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
 
 Production API는 `media-api.byulmaru.co`에서 제공하며 Kubernetes ingress가 이 hostname을 처리합니다. Cloudflare Worker 코드와 배포는 남아 있지만, API route와 `workers.dev` endpoint는 비활성화합니다. 전환 뒤 최대 10분 동안 기존 Worker가 발급한 upload ticket이 Node.js 서버에서 실패할 수 있습니다.
 
@@ -178,7 +178,7 @@ docker run --rm -p 3000:3000 --env-file /path/to/runtime.env ghcr.io/byulmaru/me
 
 ## Temporal Worker
 
-Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 API와 같은 image digest를 사용합니다. Temporal Activity는 Sharp로 source를 비동기 decode한 뒤 WebP로 encode합니다. 필요한 환경 변수는 다음과 같습니다.
+Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 API와 같은 image digest를 사용합니다. 준비 Activity는 Sharp로 source를 검증하고 WebP를 private staging에 인코딩합니다. 게시 Activity는 준비된 객체를 알려진 길이로 공개 bucket에 stream하며 인코딩하지 않습니다. 필요한 환경 변수는 다음과 같습니다.
 
 - Temporal: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`
 - Bucket 설정: `PUBLIC_BASE_URL`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_STAGING_BUCKET_NAME`
@@ -237,9 +237,9 @@ Content-Type: application/json
 {"staging":true}
 ```
 
-응답은 기본 upload와 같은 `{id, uploadUrl, expiresAt}`이며, 이 요청에는 크기 제한을 지정할 수 없습니다. `PUT`은 Content-Type과 실제 request body를 확인해 16 MiB까지 private staging에 원본 bytes를 저장하고 `{ "id": "u_..." }`를 반환합니다. private source나 공개 output이 이미 있으면 같은 upload URL의 추가 사용은 `409`입니다. 실패나 취소 뒤 private source가 정리되고 upload URL이 아직 유효하면 다시 시도할 수 있습니다. 이 경로는 공개 bucket에 쓰거나 변환하지 않습니다.
+응답은 기본 upload와 같은 `{id, uploadUrl, expiresAt}`이며, 이 요청에는 크기 제한을 지정할 수 없습니다. `PUT`은 허용된 Content-Type과 실제 request body 크기를 확인해 최대 16 MiB의 raw source만 private staging에 저장한 뒤 `{ "id": "u_..." }`를 반환합니다. 원본 이미지의 유효성 검증과 WebP 준비는 Temporal Workflow가 시작된 직후 수행합니다. 원본 key와 metadata는 기존처럼 `HEAD`에서 확인할 수 있습니다. private source 또는 공개 output이 이미 있으면 같은 upload URL의 추가 사용은 `409`입니다. 이 경로는 공개 bucket에 쓰지 않습니다.
 
-Kosmo는 성공한 `PUT` 뒤 `startUpload`를 시작하고, source key `uploads/<id>/<id의 UUID>`와 Content-Type, `maxBytes: 16777216`, `maxDimension: 8192`를 전달합니다. 기존 Nexus workflow는 게시 요청까지 private source를 유지한 뒤 공개 WebP를 저장합니다. 기본 `GET`과 `HEAD /v1/uploads/<id>`는 공개 표현만 확인하므로 게시 전에는 `404`를 반환합니다. Version 2 signed token은 version 1 legacy upload와 분리되어 있어 기존 upload URL은 공개 업로드 동작을 유지합니다.
+Kosmo PR #1240에서 제안한 composer 흐름은 사용자가 이미지를 선택할 때 raw source를 업로드합니다. 성공한 v2 `PUT`은 raw source만 private 상태로 저장하며, 기존 raw source `HEAD` 계약은 그대로입니다. 별도의 prepare API 호출은 필요하지 않습니다. 글 등록 제출 시 `completeMediaUpload`가 `mediaService.startUpload`를 시작하고 `publishUpload`를 요청한 뒤 결과를 기다립니다. Media 상태가 READY로 바뀐 다음 게시글을 생성합니다. 프로필 이미지 흐름은 `PUT` 직후 완료 요청을 계속 실행합니다. 이 내용은 Kosmo PR #1240이 제안하는 클라이언트 계약을 설명하며, 해당 PR이 이미 배포되었다는 뜻은 아닙니다. Kosmo 서버는 `uploads/<id>/<id의 UUID>` source key와 Content-Type, `maxBytes: 16777216`, `maxDimension: 8192`를 Nexus에 전달합니다. 새 Nexus Workflow는 시작 직후 원본을 검증하고 prepared WebP를 private staging에 만든 뒤 공개 확정 요청까지 보관해 승격합니다. 기본 `GET`과 `HEAD /v1/uploads/<id>`는 공개 표현만 반환하므로 공개 확정 요청 전에는 `404`입니다. Version 2 signed token은 version 1과 분리되어 기존 upload URL 동작을 유지합니다.
 
 Kosmo는 Media API 인증 키로 staging source metadata를 확인할 수 있습니다.
 

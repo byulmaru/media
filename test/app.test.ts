@@ -72,6 +72,8 @@ describe("media API", () => {
   it("stages raw uploads privately for the existing Nexus workflow", async () => {
     const ticket = await createUpload(worker, { staging: true });
     expect(Object.keys(ticket).sort()).toEqual(["expiresAt", "id", "uploadUrl"]);
+    const sourceKey = `uploads/${ticket.id}/${ticket.id.slice(2)}`;
+    const rawBytes = new TextEncoder().encode("not an image");
     const pending = await worker.fetch(
       `https://media.example.com/v1/uploads/${ticket.id}?staging=true`,
       { method: "HEAD", headers: authHeaders },
@@ -83,54 +85,57 @@ describe("media API", () => {
     const upload = await worker.fetch(ticket.uploadUrl, {
       method: "PUT",
       headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
-      body: PNG_1X1,
+      body: rawBytes,
     });
 
-    expect(upload.status).toBe(201);
-    expect(upload.headers.get("Access-Control-Allow-Origin")).toBe("https://app.example.com");
-    await expect(upload.json()).resolves.toEqual({ id: ticket.id });
+    try {
+      expect(upload.status).toBe(201);
+      expect(upload.headers.get("Access-Control-Allow-Origin")).toBe("https://app.example.com");
+      await expect(upload.json()).resolves.toEqual({ id: ticket.id });
 
-    const sourceKey = `uploads/${ticket.id}/${ticket.id.slice(2)}`;
-    const source = await staging.get(sourceKey);
-    expect(source).not.toBeNull();
-    expect(source?.httpMetadata?.contentType).toBe("image/png");
-    expect(new Uint8Array(await source!.arrayBuffer())).toEqual(PNG_1X1);
+      const source = await staging.get(sourceKey);
+      expect(source).not.toBeNull();
+      expect(source?.httpMetadata?.contentType).toBe("image/png");
+      expect(new Uint8Array(await source!.arrayBuffer())).toEqual(rawBytes);
 
-    const stagedStatus = await worker.fetch(
-      `https://media.example.com/v1/uploads/${ticket.id}?staging=true`,
-      { method: "HEAD", headers: authHeaders },
-    );
-    expect(stagedStatus.status).toBe(200);
-    expect(stagedStatus.headers.get("Cache-Control")).toBe("no-store");
-    expect(stagedStatus.headers.get("Content-Length")).toBe(String(source!.size));
-    expect(stagedStatus.headers.get("Content-Type")).toBe("image/png");
-    expect(stagedStatus.headers.get("Last-Modified")).toBe(source!.uploaded.toUTCString());
-    expect(await stagedStatus.text()).toBe("");
+      const stagedStatus = await worker.fetch(
+        `https://media.example.com/v1/uploads/${ticket.id}?staging=true`,
+        { method: "HEAD", headers: authHeaders },
+      );
+      expect(stagedStatus.status).toBe(200);
+      expect(stagedStatus.headers.get("Cache-Control")).toBe("no-store");
+      expect(stagedStatus.headers.get("Content-Length")).toBe(String(source!.size));
+      expect(stagedStatus.headers.get("Content-Type")).toBe("image/png");
+      expect(stagedStatus.headers.get("Last-Modified")).toBe(source!.uploaded.toUTCString());
+      expect(await stagedStatus.text()).toBe("");
 
-    const stagedGet = await worker.fetch(
-      `https://media.example.com/v1/uploads/${ticket.id}?staging=true`,
-      { headers: authHeaders },
-    );
-    expect(stagedGet.status).toBe(405);
-    expect(stagedGet.headers.get("Allow")).toBe("HEAD");
-    expect(await stagedGet.text()).toBe("");
+      const stagedGet = await worker.fetch(
+        `https://media.example.com/v1/uploads/${ticket.id}?staging=true`,
+        { headers: authHeaders },
+      );
+      expect(stagedGet.status).toBe(405);
+      expect(stagedGet.headers.get("Allow")).toBe("HEAD");
+      expect(await stagedGet.text()).toBe("");
 
-    expect(await staging.head(sourceKey)).not.toBeNull();
-    expect(await media.get(`original/${ticket.id}.webp`)).toBeNull();
-    expect((await worker.fetch(`https://media.example.com/v1/uploads/${ticket.id}`, {
-      method: "HEAD",
-      headers: authHeaders,
-    })).status).toBe(404);
-    expect((await worker.fetch(`https://media.example.com/v1/uploads/${ticket.id}`, {
-      headers: authHeaders,
-    })).status).toBe(404);
+      expect(await staging.head(sourceKey)).not.toBeNull();
+      expect(await media.get(`original/${ticket.id}.webp`)).toBeNull();
+      expect((await worker.fetch(`https://media.example.com/v1/uploads/${ticket.id}`, {
+        method: "HEAD",
+        headers: authHeaders,
+      })).status).toBe(404);
+      expect((await worker.fetch(`https://media.example.com/v1/uploads/${ticket.id}`, {
+        headers: authHeaders,
+      })).status).toBe(404);
 
-    const duplicate = await worker.fetch(ticket.uploadUrl, {
-      method: "PUT",
-      headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
-      body: PNG_1X1,
-    });
-    expect(duplicate.status).toBe(409);
+      const duplicate = await worker.fetch(ticket.uploadUrl, {
+        method: "PUT",
+        headers: { Origin: "https://app.example.com", "Content-Type": "image/png" },
+        body: rawBytes,
+      });
+      expect(duplicate.status).toBe(409);
+    } finally {
+      await staging.delete(sourceKey);
+    }
   });
 
   it("rejects invalid staged requests without writing and accepts the byte limit", async () => {
