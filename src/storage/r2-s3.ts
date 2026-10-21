@@ -29,6 +29,8 @@ export class R2S3MediaStorage implements MediaStorage {
       );
       return {
         httpMetadata: { contentType: object.ContentType },
+        size: object.ContentLength,
+        uploaded: object.LastModified,
       };
     } catch (error) {
       if (error instanceof S3ServiceException && error.$metadata.httpStatusCode === 404) {

@@ -20,6 +20,7 @@ const appEnv = {
   PUBLIC_API_BASE_URL: "https://external-api.example.com",
   R2_ENDPOINT: "https://account.r2.cloudflarestorage.com",
   R2_BUCKET_NAME: "byulmaru-media",
+  R2_STAGING_BUCKET_NAME: "byulmaru-media-staging",
   AWS_ACCESS_KEY_ID: "test-access-key",
   AWS_SECRET_ACCESS_KEY: "test-secret-key",
 };
@@ -64,6 +65,14 @@ test("Node startup validates required config, port, and R2 endpoint", async () =
     /R2_ENDPOINT must be an HTTPS origin/,
   );
   await assert.rejects(
+    startServer({ ...appEnv, R2_STAGING_BUCKET_NAME: undefined }),
+    /R2_STAGING_BUCKET_NAME is required/,
+  );
+  await assert.rejects(
+    startServer({ ...appEnv, R2_STAGING_BUCKET_NAME: appEnv.R2_BUCKET_NAME }),
+    /service configuration is incomplete/,
+  );
+  await assert.rejects(
     startServer({ ...appEnv, PUBLIC_API_BASE_URL: "https://external-api.example.com/path" }),
     /service configuration is incomplete/,
   );
@@ -93,13 +102,19 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
           Bucket: "byulmaru-media",
           Key: "original/u_existing.webp",
         });
-        return { ContentType: "image/webp" };
+        return {
+          ContentLength: 123,
+          ContentType: "image/webp",
+          LastModified: new Date("2026-10-21T00:00:00.000Z"),
+        };
       },
     },
     "byulmaru-media",
   );
   assert.deepEqual(await headStorage.head("original/u_existing.webp"), {
     httpMetadata: { contentType: "image/webp" },
+    size: 123,
+    uploaded: new Date("2026-10-21T00:00:00.000Z"),
   });
 
   const missingStorage = new R2S3MediaStorage(
@@ -180,7 +195,11 @@ class MemoryMediaStorage {
 
   async head(key) {
     const object = this.objects.get(key);
-    return object ? { httpMetadata: object.httpMetadata } : null;
+    return object ? {
+      httpMetadata: object.httpMetadata,
+      size: object.size,
+      uploaded: object.uploaded,
+    } : null;
   }
 
   async put(key, value, options) {
@@ -189,6 +208,8 @@ class MemoryMediaStorage {
     this.objects.set(key, {
       bytes: Buffer.from(value),
       httpMetadata: options.httpMetadata,
+      size: value.byteLength,
+      uploaded: new Date(),
     });
     return {};
   }
@@ -305,6 +326,127 @@ test("built Node server converts a PNG over HTTP and preserves upload semantics"
       url: `https://media.byulma.run/${key}`,
       mediaType: "image/webp",
     });
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("built Node server stages raw uploads privately", async () => {
+  const media = new MemoryMediaStorage();
+  const staging = new MemoryMediaStorage();
+  const port = await findAvailablePort();
+  const server = await startServer(
+    { ...appEnv, PORT: String(port) },
+    media,
+    staging,
+  );
+  try {
+    await once(server, "listening");
+    const address = server.address();
+    assert(address && typeof address === "object");
+
+    const created = await sendHttp(address.port, "/v1/uploads", {
+      method: "POST",
+      headers: {
+        Host: "internal.example",
+        Authorization: "Bearer test-api-key",
+        "Content-Type": "application/json",
+      },
+      body: Buffer.from(JSON.stringify({ staging: true })),
+    });
+    assert.equal(created.statusCode, 201);
+    const ticket = JSON.parse(created.body.toString("utf8"));
+    assert.deepEqual(Object.keys(ticket).sort(), ["expiresAt", "id", "uploadUrl"]);
+
+    const uploadPath = new URL(ticket.uploadUrl).pathname;
+    const uploaded = await sendHttp(address.port, uploadPath, {
+      method: "PUT",
+      headers: {
+        Host: "internal.example",
+        Origin: "https://app.example.com",
+        "Content-Type": "image/png",
+      },
+      body: PNG_1X1,
+    });
+    assert.equal(uploaded.statusCode, 201);
+    assert.deepEqual(JSON.parse(uploaded.body.toString("utf8")), { id: ticket.id });
+
+    const sourceKey = `uploads/${ticket.id}/${ticket.id.slice(2)}`;
+    const staged = staging.objects.get(sourceKey);
+    assert.deepEqual(staged.bytes, PNG_1X1);
+    assert.deepEqual(staged.httpMetadata, { contentType: "image/png" });
+    assert.equal(media.objects.has(`original/${ticket.id}.webp`), false);
+
+    const status = await sendHttp(
+      address.port,
+      `/v1/uploads/${ticket.id}?staging=true`,
+      {
+        method: "HEAD",
+        headers: { Host: "internal.example", Authorization: "Bearer test-api-key" },
+      },
+    );
+    assert.equal(status.statusCode, 200);
+    assert.equal(status.headers["cache-control"], "no-store");
+    assert.equal(status.headers["content-length"], String(PNG_1X1.byteLength));
+    assert.equal(status.headers["content-type"], "image/png");
+    assert.equal(status.headers["last-modified"], staged.uploaded.toUTCString());
+    assert.equal(status.body.length, 0);
+
+    const stagedGet = await sendHttp(address.port, `/v1/uploads/${ticket.id}?staging=true`, {
+      headers: { Host: "internal.example", Authorization: "Bearer test-api-key" },
+    });
+    assert.equal(stagedGet.statusCode, 405);
+    assert.equal(stagedGet.headers.allow, "HEAD");
+    assert.equal(stagedGet.body.length, 0);
+
+    const duplicate = await sendHttp(address.port, uploadPath, {
+      method: "PUT",
+      headers: { Host: "internal.example", Origin: "https://app.example.com", "Content-Type": "image/png" },
+      body: PNG_1X1,
+    });
+    assert.equal(duplicate.statusCode, 409);
+
+    const pending = await sendHttp(address.port, `/v1/uploads/${ticket.id}`, {
+      method: "HEAD",
+      headers: { Host: "internal.example", Authorization: "Bearer test-api-key" },
+    });
+    assert.equal(pending.statusCode, 404);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("built Node server omits unavailable staging HEAD metadata", async () => {
+  const id = "u_00000000-0000-4000-8000-000000000000";
+  const staging = {
+    async head(key) {
+      assert.equal(key, `uploads/${id}/${id.slice(2)}`);
+      return { httpMetadata: { contentType: "image/png" } };
+    },
+    async put() {
+      throw new Error("staging metadata reads do not write");
+    },
+  };
+  const port = await findAvailablePort();
+  const server = await startServer(
+    { ...appEnv, PORT: String(port) },
+    new MemoryMediaStorage(),
+    staging,
+  );
+  try {
+    await once(server, "listening");
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const status = await sendHttp(address.port, `/v1/uploads/${id}?staging=true`, {
+      method: "HEAD",
+      headers: { Host: "internal.example", Authorization: "Bearer test-api-key" },
+    });
+
+    assert.equal(status.statusCode, 200);
+    assert.equal(status.headers["content-type"], "image/png");
+    assert.equal(status.headers["content-length"], undefined);
+    assert.equal(status.headers["last-modified"], undefined);
+    assert.equal(status.body.length, 0);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

@@ -1,5 +1,7 @@
 export interface MediaObject {
   httpMetadata?: { contentType?: string };
+  size?: number;
+  uploaded?: Date;
 }
 
 export interface MediaPutOptions {

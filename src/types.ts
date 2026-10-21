@@ -2,6 +2,7 @@ import type { MediaStorage } from "./storage";
 
 export interface Env {
   MEDIA: MediaStorage;
+  STAGING?: MediaStorage;
   API_KEY: string;
   UPLOAD_SIGNING_SECRET: string;
   ALLOWED_ORIGINS: string;
@@ -17,7 +18,7 @@ export interface Limits {
 }
 
 export interface UploadTokenPayload extends Limits {
-  version: 1;
+  version: 1 | 2;
   id: string;
   expiresAt: number;
 }
