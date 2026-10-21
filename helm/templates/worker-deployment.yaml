@@ -62,15 +62,5 @@ spec:
                 secretKeyRef:
                   name: env
                   key: AWS_SECRET_ACCESS_KEY
-            - name: R2_STAGING_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: env
-                  key: R2_STAGING_ACCESS_KEY_ID
-            - name: R2_STAGING_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: env
-                  key: R2_STAGING_SECRET_ACCESS_KEY
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

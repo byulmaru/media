@@ -70,8 +70,6 @@ describe("Temporal upload configuration", () => {
     AWS_ACCESS_KEY_ID: "media-access-key",
     AWS_SECRET_ACCESS_KEY: "media-secret-key",
     R2_STAGING_BUCKET_NAME: "byulmaru-media-staging",
-    R2_STAGING_ACCESS_KEY_ID: "staging-access-key",
-    R2_STAGING_SECRET_ACCESS_KEY: "staging-secret-key",
   };
 
   it("accepts complete nonblank config and keeps staging private from the public bucket", () => {
@@ -84,8 +82,8 @@ describe("Temporal upload configuration", () => {
 
   it.each([
     ["Temporal address", { TEMPORAL_ADDRESS: " " }],
-    ["staging access key", { R2_STAGING_ACCESS_KEY_ID: "" }],
-    ["staging secret", { R2_STAGING_SECRET_ACCESS_KEY: " " }],
+    ["AWS access key", { AWS_ACCESS_KEY_ID: "" }],
+    ["AWS secret", { AWS_SECRET_ACCESS_KEY: " " }],
     ["R2 endpoint", { R2_ENDPOINT: "https://account.r2.example.com/path" }],
   ])("rejects missing or invalid %s", (_name, patch) => {
     expect(temporalUploadConfigSchema.safeParse({ ...config, ...patch }).success).toBe(false);

@@ -27,8 +27,8 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
   const staging = createR2S3StagingStorage({
     endpoint: config.R2_ENDPOINT,
     bucketName: config.R2_STAGING_BUCKET_NAME,
-    accessKeyId: config.R2_STAGING_ACCESS_KEY_ID,
-    secretAccessKey: config.R2_STAGING_SECRET_ACCESS_KEY,
+    accessKeyId: config.AWS_ACCESS_KEY_ID,
+    secretAccessKey: config.AWS_SECRET_ACCESS_KEY,
   });
   const connection = await NativeConnection.connect({ address: config.TEMPORAL_ADDRESS });
   try {

@@ -102,7 +102,7 @@ media Workflow는 Hope queue에 변환 Activity를 예약합니다. Activity는 
 
 Staging bucket에는 custom domain, public CORS, `r2.dev` URL을 설정하지 않습니다.
 
-Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. R2 S3 access key는 서버의 secret store에 보관하고 이미지로 복사하지 않습니다. Staging key는 비공개 bucket의 object read/write만 허용합니다.
+Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. `AWS_ACCESS_KEY_ID`와 `AWS_SECRET_ACCESS_KEY`는 `byulmaru-media`와 `byulmaru-media-staging` bucket의 object read/write만 허용하고, 서버의 secret store에 보관하며 이미지로 복사하지 않습니다. API와 Temporal Worker는 같은 credentials를 사용하므로 API pod에도 private staging bucket의 read/write 권한이 있습니다.
 
 Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 실행합니다. Pull request에서는 plan만 만들고, `main` push와 수동 실행에서는 새 saved plan을 생성해 그대로 적용합니다. State는 `byulmaru-terraform-state` S3 bucket의 `media/terraform.tfstate` key를 사용합니다.
 
@@ -157,7 +157,7 @@ pnpm start:server
 - `AWS_SECRET_ACCESS_KEY`
 - `PUBLIC_API_BASE_URL`: 클라이언트가 호출하는 서버의 HTTPS public API origin. 로컬 개발에서는 `http://localhost`, `http://127.0.0.1`, `http://[::1]` origin도 허용합니다. Production에서는 Helm의 `host` 값이 이 origin을 정합니다.
 
-`PUBLIC_API_BASE_URL`은 Node가 signed upload URL에 넣는 외부 API origin입니다. reverse proxy의 내부 주소가 아니라 클라이언트가 호출하는 HTTPS public origin을 사용하며, 외부 HTTP origin은 거부합니다. Worker는 이 변수를 사용하지 않고 요청 URL을 사용합니다. S3 region은 `auto`로 고정합니다. R2 S3 access key는 이 bucket에 대한 읽기와 쓰기만 허용하도록 만들고 실행 환경의 secret store에 보관합니다. `PORT`는 선택 사항이며 기본값은 `3000`입니다. 서버는 `0.0.0.0`에서 listen합니다.
+`PUBLIC_API_BASE_URL`은 Node가 signed upload URL에 넣는 외부 API origin입니다. reverse proxy의 내부 주소가 아니라 클라이언트가 호출하는 HTTPS public origin을 사용하며, 외부 HTTP origin은 거부합니다. Worker는 이 변수를 사용하지 않고 요청 URL을 사용합니다. S3 region은 `auto`로 고정합니다. credentials는 실행 환경의 secret store에 보관합니다. `PORT`는 선택 사항이며 기본값은 `3000`입니다. 서버는 `0.0.0.0`에서 listen합니다.
 
 Production image를 로컬에서 빌드하고 실행할 수 있습니다. `/path/to/runtime.env`는 위 환경 변수의 실제 값을 담은 실행 환경 파일입니다.
 
@@ -179,9 +179,9 @@ Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 API와 �
 
 - Temporal: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`
 - Bucket 설정: `PUBLIC_BASE_URL`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_STAGING_BUCKET_NAME`
-- R2 credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `R2_STAGING_ACCESS_KEY_ID`, `R2_STAGING_SECRET_ACCESS_KEY`
+- R2 credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
 
-`AWS_*` pair는 공개 bucket에, `R2_STAGING_*` pair는 private staging bucket에만 접근하도록 제한합니다. Helm chart는 non-secret 설정을 values에서, 네 credentials를 Vault secret에서 Worker에 전달합니다.
+`AWS_*` pair는 `byulmaru-media`와 `byulmaru-media-staging`의 object read/write에 사용합니다. Helm chart는 non-secret 설정을 values에서, 이 pair를 Vault secret에서 API와 Worker에 전달합니다.
 
 ## API
 
@@ -289,7 +289,7 @@ pnpm infra:validate
 1. 위 Tailscale 변수와 외부 workload identity 정책을 준비한 뒤 Kubernetes repository의 Terraform 변경을 적용해 Media GitHub OIDC identity에 Argo CD `media` project 접근 권한을 줍니다. 이어서 이 repository의 Terraform을 적용해 `helm/` chart를 `media` namespace에 배포하는 `media` Application을 만듭니다. 처음에는 자동 동기화가 꺼져 있습니다.
 2. Worker 배포 전에 Kubernetes repository의 PR 145 NetworkPolicy 변경을 적용합니다. 이 network rule은 `media` namespace에서 Temporal frontend의 TCP 7233으로 연결할 수 있게 합니다. 이는 frontend network reachability만 허용하며 Temporal namespace authorization을 설정하지 않습니다. 다른 namespace나 port 허용은 추가하지 않습니다.
 3. Chart의 PreSync Job은 `media` Temporal namespace를 30일 retention으로 생성하거나 조정합니다. Temporal CLI는 cluster server와 같은 `1.31.2` admin-tools image를 사용하고 TLS와 config file/env 설정을 끕니다. NetworkPolicy를 먼저 적용해야 합니다.
-4. PR 13 storage 변경을 적용해 private `byulmaru-media-staging` bucket과 `uploads/` prefix의 48시간 lifecycle backstop, 미완료 multipart upload의 24시간 abort rule을 준비합니다. Terraform workflow와 Media Deploy workflow는 별개라 같은 push에서 실행 순서가 보장되지 않습니다. Vault Secrets Operator와 `vso-kubernetes-sync` Kubernetes auth role을 준비하고 KV v2 `secret/kubernetes/media`에 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `R2_STAGING_ACCESS_KEY_ID`, `R2_STAGING_SECRET_ACCESS_KEY`를 저장합니다. `API_KEY`는 호출자가 사용하는 값이어야 합니다. staging key에는 private bucket의 object read/write 권한만 주고 Helm values나 image에는 credentials를 넣지 않습니다.
+4. PR 13 storage 변경을 적용해 private `byulmaru-media-staging` bucket과 `uploads/` prefix의 48시간 lifecycle backstop, 미완료 multipart upload의 24시간 abort rule을 준비합니다. Terraform workflow와 Media Deploy workflow는 별개라 같은 push에서 실행 순서가 보장되지 않습니다. Vault Secrets Operator와 `vso-kubernetes-sync` Kubernetes auth role을 준비하고 KV v2 `secret/kubernetes/media`에 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`를 저장합니다. `API_KEY`는 호출자가 사용하는 값이어야 합니다. AWS pair에는 두 bucket의 object read/write 권한만 주고 Helm values나 image에는 credentials를 넣지 않습니다.
 5. Chart의 기본 API host는 `media-api.byulmaru.co`이며 `host` 값이 HTTPRoute hostname과 `PUBLIC_API_BASE_URL`을 함께 정합니다. HTTPRoute는 `gateway/public` Gateway를 사용합니다. Cloudflare에 이 host의 proxied A record를 public Gateway EIP (`aws_eip.public_gateway_nlb.public_ip` in Kubernetes Terraform)로 한 번 추가해야 합니다. 이 repository는 DNS를 관리하지 않으며 공개 이미지 URL `media.byulma.run`은 그대로 사용합니다.
 6. 첫 성공한 ARM64 게시 후 Deploy workflow가 source SHA, `version`, `imageDigest`를 함께 설정하고 자동 동기화, prune, self-heal을 켭니다. 이 첫 sync에서 위 PreSync Job이 `media` Temporal namespace를 준비합니다. Chart의 기본 image reference는 기존 AMD64 seed이므로 첫 ARM64 게시 전에는 수동 sync하지 않습니다. Deploy workflow는 Application의 목표 SHA/version/digest와 관찰된 sync SHA가 맞고 sync가 `Synced`, health가 `Healthy`일 때 성공합니다. API와 Worker는 같은 ARM64 image digest를 사용하며 Worker는 HTTP port나 Service를 노출하지 않습니다.
 7. Nexus endpoint 이름 `media-upload`는 cluster-global registry에 운영자가 한 번 등록합니다. Chart는 endpoint를 자동 생성하거나 수정하지 않습니다. 첫 sync가 완료되고 `media` Temporal namespace가 준비된 뒤 endpoint를 설정합니다. Endpoint는 namespace `media`, task queue `media-upload`를 가리켜야 합니다. Temporal frontend에 연결 가능한 권한 있는 host에서 먼저 확인합니다.
