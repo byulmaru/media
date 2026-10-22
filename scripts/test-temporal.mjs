@@ -12,12 +12,17 @@ import {
   S3Client,
   S3ServiceException,
 } from "@aws-sdk/client-s3";
-import { ApplicationFailure } from "@temporalio/activity";
+import { ApplicationFailure, Context, heartbeat } from "@temporalio/activity";
 import { defaultPayloadConverter } from "@temporalio/client";
 import { TestWorkflowEnvironment } from "@temporalio/testing";
 import { bundleWorkflowCode, Worker } from "@temporalio/worker";
 import {
   createUploadProcessingActivities,
+  createMediaServiceHandler,
+  DEFAULT_MAX_BYTES,
+  HOPE_PROCESSING_ERROR_TYPE,
+  HOPE_TASK_QUEUE,
+  hopePreparedUploadKey,
   JPEG_ORIENTED_2X1,
   mediaServiceHandler,
   PNG_RGBA_2X1,
@@ -117,7 +122,6 @@ test("staging adapter maps missing metadata and bounds streamed reads", async ()
     assert.equal(invalidBody.destroyed, true);
   }
 });
-
 class MemoryStagingStorage {
   objects = new Map();
   lastModifiedReads = new Map();
@@ -128,6 +132,7 @@ class MemoryStagingStorage {
   failDeleteKey;
   transientDeleteKey;
   getGate;
+  putGate;
 
   seed(key, bytes, lastModified = new Date(), contentType = "image/png") {
     this.objects.set(key, {
@@ -172,6 +177,10 @@ class MemoryStagingStorage {
     for await (const chunk of body) chunks.push(Buffer.from(chunk));
     const bytes = Buffer.concat(chunks);
     assert.equal(bytes.byteLength, contentLength);
+    if (this.putGate?.matches(key)) {
+      this.putGate.started(key);
+      await this.putGate.promise;
+    }
     this.objects.set(key, {
       bytes,
       lastModified: new Date(),
@@ -370,6 +379,12 @@ function withTimeout(promise, timeoutMs, message) {
   ]).finally(() => clearTimeout(timer));
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function errorCauseChain(error) {
   const messages = [];
   const seen = new Set();
@@ -395,15 +410,51 @@ async function waitFor(predicate, message, timeoutMs = WORKFLOW_TIMEOUT_MS) {
   throw new Error(message);
 }
 
-async function startWorker(environment, workflowBundle, staging, media, failures, activities) {
+async function startWorker(
+  environment,
+  workflowBundle,
+  staging,
+  media,
+  failures,
+  activities,
+  nexusServices = [mediaServiceHandler],
+) {
   const worker = await Worker.create({
     connection: environment.nativeConnection,
     namespace: environment.namespace,
     taskQueue: TASK_QUEUE,
     workflowBundle: { code: workflowBundle.code },
     activities: activities ?? createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL),
-    nexusServices: [mediaServiceHandler],
+    nexusServices,
     maxConcurrentActivityTaskExecutions: 4,
+  });
+  const run = worker.run().catch((error) => { failures.push(error); });
+  return { worker, run };
+}
+
+async function startHopeWorker(environment, prepareHopeUpload, failures) {
+  const worker = await Worker.create({
+    connection: environment.nativeConnection,
+    namespace: environment.namespace,
+    taskQueue: HOPE_TASK_QUEUE,
+    activities: {
+      async prepareHopeUpload(input) {
+        assert.equal(input.maxEdge, 1024);
+        const { cancellationSignal } = Context.current();
+        const heartbeatTimer = setInterval(() => {
+          if (!cancellationSignal.aborted) heartbeat();
+        }, 5_000);
+        try {
+          cancellationSignal.throwIfAborted();
+          await prepareHopeUpload(input, cancellationSignal);
+          cancellationSignal.throwIfAborted();
+        } finally {
+          clearInterval(heartbeatTimer);
+        }
+      },
+    },
+    maxConcurrentActivityTaskExecutions: 1,
+    maxHeartbeatThrottleInterval: 5_000,
   });
   const run = worker.run().catch((error) => { failures.push(error); });
   return { worker, run };
@@ -419,6 +470,22 @@ async function startCaller(environment, endpoint, input, workflowId, timeout = "
     workflowId,
     taskQueue: TASK_QUEUE,
     args: [endpoint, input, timeout],
+  });
+}
+
+async function startApplyHopeCaller(environment, endpoint, input, workflowId, timeout = "25 hours") {
+  return environment.client.workflow.start("nexusApplyHopeCallerWorkflow", {
+    workflowId,
+    taskQueue: TASK_QUEUE,
+    args: [endpoint, input, timeout],
+  });
+}
+
+async function startPublishCaller(environment, endpoint, id, workflowId) {
+  return environment.client.workflow.start("nexusPublishCallerWorkflow", {
+    workflowId,
+    taskQueue: TASK_QUEUE,
+    args: [endpoint, id],
   });
 }
 
@@ -713,6 +780,109 @@ test("markerless legacy history replays without preparing until publish is signa
     assert.equal(staging.objects.has(source.sourceKey), false);
     assert.equal(staging.objects.has(preparedKey(source.sourceKey)), false);
     assert.deepEqual(staging.deleteKeys, [preparedKey(source.sourceKey), source.sourceKey]);
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
+test("prepared-before-wait history replays with the Hope-aware workflow", async () => {
+  const preparedWorkflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/fixtures/pre-hope-prepared-upload-workflow.ts"),
+  });
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const previousCalls = { prepare: 0 };
+  const source = newUpload();
+  const input = uploadInput(source.id, source.sourceKey);
+  const defaultKey = preparedKey(source.sourceKey);
+  const publicKey = `original/${source.id}.webp`;
+  staging.seed(source.sourceKey, PNG_1X1);
+  let worker;
+
+  try {
+    const previousActivities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+    worker = await startWorker(
+      environment,
+      preparedWorkflowBundle,
+      staging,
+      media,
+      workerFailures,
+      {
+        ...previousActivities,
+        async prepareUploadImage(activityInput) {
+          previousCalls.prepare += 1;
+          return previousActivities.prepareUploadImage(activityInput);
+        },
+      },
+    );
+    const handle = await environment.client.workflow.start("processUploadWorkflow", {
+      workflowId: `prepared-replay:${source.id}`,
+      taskQueue: TASK_QUEUE,
+      args: [input],
+    });
+
+    await waitFor(async () => {
+      if (!staging.objects.has(defaultKey)) return false;
+      const history = await handle.fetchHistory();
+      return history.events.some((event) => event.timerStartedEventAttributes);
+    }, "prepared workflow did not reach its durable publish wait");
+    const previousHistory = await handle.fetchHistory();
+    assert.equal(previousCalls.prepare, 1);
+    assert(previousHistory.events.some((event) => event.markerRecordedEventAttributes));
+    assert.equal(staging.contentReads.get(source.sourceKey), 1);
+    assert.equal(media.objects.has(publicKey), false);
+    const preparedBytes = Buffer.from(staging.objects.get(defaultKey).bytes);
+
+    await stopWorker(worker);
+    worker = undefined;
+    const nextCalls = { prepare: 0, publish: 0, process: 0 };
+    const nextActivities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      {
+        ...nextActivities,
+        async prepareUploadImage(activityInput) {
+          nextCalls.prepare += 1;
+          return nextActivities.prepareUploadImage(activityInput);
+        },
+        async publishPreparedUpload(activityInput) {
+          nextCalls.publish += 1;
+          return nextActivities.publishPreparedUpload(activityInput);
+        },
+        async processUploadImage(activityInput) {
+          nextCalls.process += 1;
+          return nextActivities.processUploadImage(activityInput);
+        },
+      },
+    );
+
+    await handle.signal("publishUpload");
+    const result = await withTimeout(
+      handle.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "prepared history did not replay and publish",
+    );
+    assert.equal(result.id, source.id);
+    assert.deepEqual(nextCalls, { prepare: 0, publish: 1, process: 0 });
+    assert.equal(staging.streamReads.get(defaultKey), 1);
+    assert.deepEqual(media.objects.get(publicKey).bytes, preparedBytes);
+    assert.equal(staging.objects.has(source.sourceKey), false);
+    assert.equal(staging.objects.has(defaultKey), false);
+    assert.deepEqual(staging.deleteKeys, [defaultKey, source.sourceKey]);
     assert.deepEqual(workerFailures, []);
   } finally {
     if (worker) await stopWorker(worker).catch(() => undefined);
@@ -1174,6 +1344,641 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.deepEqual(workerFailures, []);
   } finally {
     if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
+test("Nexus applyHope waits for queued processing and publishes its private variant", async () => {
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const endpointName = "media-hope-test-" + randomUUID();
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
+  const prepareStarted = deferred();
+  const prepareGate = deferred();
+  const protectedWebp = await sharp({
+    create: { width: 1, height: 1, channels: 3, background: { r: 240, g: 25, b: 135 } },
+  }).webp().toBuffer();
+  let worker;
+  let hopeWorker;
+
+  try {
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      undefined,
+      [createMediaServiceHandler({ hopeEnabled: true })],
+    );
+
+    const source = newUpload();
+    const input = uploadInput(source.id, source.sourceKey);
+    const defaultKey = preparedKey(source.sourceKey);
+    const publicKey = "original/" + source.id + ".webp";
+    staging.seed(source.sourceKey, PNG_1X1);
+    const uploadCaller = await startCaller(
+      environment,
+      endpointName,
+      input,
+      "hope-upload:" + randomUUID(),
+    );
+    const uploadOutcomePromise = uploadCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await waitFor(() => staging.objects.has(defaultKey), "default private image was not prepared");
+    const defaultBytes = Buffer.from(staging.objects.get(defaultKey).bytes);
+
+    const applyHopeCaller = await startApplyHopeCaller(
+      environment,
+      endpointName,
+      { id: source.id, hope: { algorithm: "noise", iterations: 37, intensity: 0.65 } },
+      "hope-update:" + randomUUID(),
+      "60 seconds",
+    );
+    const hopeOutcomePromise = applyHopeCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    const uploadHandle = environment.client.workflow.getHandle("media-upload:" + source.id);
+    const scheduledEvent = await waitFor(async () => {
+      const history = await uploadHandle.fetchHistory();
+      return history.events.find(
+        (event) => event.activityTaskScheduledEventAttributes?.activityType?.name === "prepareHopeUpload",
+      );
+    }, "applyHope did not schedule prepareHopeUpload");
+    const scheduled = scheduledEvent.activityTaskScheduledEventAttributes;
+    const scheduledInput = defaultPayloadConverter.fromPayload(scheduled.input.payloads[0]);
+    assert.equal(scheduled.taskQueue.name, HOPE_TASK_QUEUE);
+    assert.equal(scheduledInput.maxEdge, 1024);
+    assert.deepEqual(scheduledInput, {
+      ...input,
+      requestId: scheduledInput.requestId,
+      maxEdge: 1024,
+      hope: { algorithm: "noise", iterations: 37, intensity: 0.65 },
+    });
+    assert.match(scheduledInput.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    const hopeKey = hopePreparedUploadKey(source.sourceKey, scheduledInput.requestId);
+
+    await delay(100);
+    assert.equal((await Promise.race([
+      hopeOutcomePromise.then(() => true),
+      delay(0).then(() => false),
+    ])), false, "applyHope completed without an external worker");
+    assert.equal(staging.objects.has(hopeKey), false);
+    assert.equal(media.putCounts.get(publicKey) ?? 0, 0);
+    assert.equal((await Promise.race([
+      uploadOutcomePromise.then(() => true),
+      delay(0).then(() => false),
+    ])), false, "upload published without an external worker");
+
+    hopeWorker = await startHopeWorker(
+      environment,
+      async (activityInput, cancellationSignal) => {
+        assert.deepEqual(activityInput, scheduledInput);
+        prepareStarted.resolve(activityInput);
+        await prepareGate.promise;
+        cancellationSignal.throwIfAborted();
+        await staging.putStream(
+          hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId),
+          Readable.from([protectedWebp]),
+          protectedWebp.byteLength,
+          {
+            onlyIf: new Headers({ "If-None-Match": "*" }),
+            httpMetadata: { contentType: "image/webp" },
+          },
+        );
+        const preparedKey = hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId);
+        assert.deepEqual(Buffer.from(staging.objects.get(preparedKey).bytes), protectedWebp);
+      },
+      workerFailures,
+    );
+    await withTimeout(prepareStarted.promise, WORKFLOW_TIMEOUT_MS, "external activity did not start");
+
+    const busyCaller = await startApplyHopeCaller(
+      environment,
+      endpointName,
+      { id: source.id, hope: { algorithm: "glaze", iterations: 8 } },
+      "hope-busy:" + randomUUID(),
+      "5 seconds",
+    );
+    const busyResult = await withTimeout(busyCaller.result(), 5_000, "busy applyHope did not reject");
+    assert.match(busyResult.error, /already in progress/i);
+
+    const publishCaller = await startPublishCaller(
+      environment,
+      endpointName,
+      source.id,
+      "hope-publish:" + randomUUID(),
+    );
+    assert.deepEqual(await withTimeout(publishCaller.result(), 5_000, "publish signal did not complete"), {
+      result: { id: source.id },
+    });
+    await waitFor(async () => {
+      const history = await uploadHandle.fetchHistory();
+      return history.events.some(
+        (event) => event.workflowExecutionSignaledEventAttributes?.signalName === "publishUpload",
+      );
+    }, "publish signal was not recorded");
+    assert.equal((await Promise.race([
+      uploadOutcomePromise.then(() => true),
+      delay(0).then(() => false),
+    ])), false, "upload published before external processing finished");
+    assert.equal(media.putCounts.get(publicKey) ?? 0, 0);
+    assert.equal(staging.objects.has(source.sourceKey), true);
+
+    prepareGate.resolve();
+    const hopeOutcome = await withTimeout(hopeOutcomePromise, WORKFLOW_TIMEOUT_MS, "applyHope did not finish");
+    assert.equal(hopeOutcome.error, undefined);
+    assert.deepEqual(hopeOutcome.value, {
+      result: {
+        id: source.id,
+        hope: { algorithm: "noise", iterations: 37, intensity: 0.65 },
+      },
+    });
+    const uploadOutcome = await withTimeout(uploadOutcomePromise, WORKFLOW_TIMEOUT_MS, "upload did not publish");
+    assert.equal(uploadOutcome.error, undefined);
+    assert.equal(uploadOutcome.value.upload.id, source.id);
+    assert.deepEqual(media.objects.get(publicKey).bytes, protectedWebp);
+    assert.notDeepEqual(media.objects.get(publicKey).bytes, defaultBytes);
+    assert.equal(staging.objects.has(source.sourceKey), false);
+    assert.equal(staging.objects.has(defaultKey), false);
+    assert.equal(staging.objects.has(hopeKey), false);
+    assert.deepEqual(
+      staging.deleteKeys.filter((key) => key === hopeKey || key === defaultKey || key === source.sourceKey),
+      [hopeKey, defaultKey, source.sourceKey],
+    );
+
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    prepareGate.resolve();
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    if (hopeWorker) await stopWorker(hopeWorker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
+test("Nexus applyHope retries transient worker failures, blocks stale publication, then clears to default", async () => {
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const activityInputs = [];
+  const endpointName = "media-hope-failure-test-" + randomUUID();
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
+  const terminalFailureStarted = deferred();
+  const terminalFailureGate = deferred();
+  const protectedWebp = await sharp({
+    create: { width: 1, height: 1, channels: 3, background: { r: 240, g: 25, b: 135 } },
+  }).webp({ quality: 50 }).toBuffer();
+  let lastGoodKey;
+  let terminalFailureInput;
+  let worker;
+  let hopeWorker;
+
+  try {
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      undefined,
+      [createMediaServiceHandler({ hopeEnabled: true })],
+    );
+    hopeWorker = await startHopeWorker(
+      environment,
+      async (activityInput, cancellationSignal) => {
+        activityInputs.push(activityInput);
+        if (activityInput.hope.algorithm === "glaze") {
+          const glazeAttempts = activityInputs.filter((item) => item.hope.algorithm === "glaze").length;
+          if (glazeAttempts === 1) {
+            throw ApplicationFailure.create({
+              message: "injected transient Hope processing failure",
+              type: HOPE_PROCESSING_ERROR_TYPE,
+            });
+          }
+          lastGoodKey = hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId);
+          await staging.putStream(
+            lastGoodKey,
+            Readable.from([protectedWebp]),
+            protectedWebp.byteLength,
+            {
+              onlyIf: new Headers({ "If-None-Match": "*" }),
+              httpMetadata: { contentType: "image/webp" },
+            },
+          );
+          return;
+        }
+
+        terminalFailureInput = activityInput;
+        terminalFailureStarted.resolve(activityInput);
+        await terminalFailureGate.promise;
+        cancellationSignal.throwIfAborted();
+        throw ApplicationFailure.create({
+          message: "injected terminal Hope processing failure",
+          type: HOPE_PROCESSING_ERROR_TYPE,
+          nonRetryable: true,
+        });
+      },
+      workerFailures,
+    );
+
+    const source = newUpload();
+    const input = uploadInput(source.id, source.sourceKey);
+    const defaultKey = preparedKey(source.sourceKey);
+    const publicKey = "original/" + source.id + ".webp";
+    staging.seed(source.sourceKey, PNG_1X1);
+    const uploadCaller = await startCaller(
+      environment,
+      endpointName,
+      input,
+      "hope-failure-upload:" + randomUUID(),
+    );
+    const uploadOutcomePromise = uploadCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await waitFor(() => staging.objects.has(defaultKey), "default private image was not prepared");
+    const defaultBytes = Buffer.from(staging.objects.get(defaultKey).bytes);
+
+    const successfulHopeCaller = await startApplyHopeCaller(
+      environment,
+      endpointName,
+      { id: source.id, hope: { algorithm: "glaze", iterations: 29 } },
+      "hope-retry:" + randomUUID(),
+      "15 seconds",
+    );
+    assert.deepEqual(await withTimeout(
+      successfulHopeCaller.result(),
+      15_000,
+      "transient Hope activity failure did not retry",
+    ), {
+      result: { id: source.id, hope: { algorithm: "glaze", iterations: 29, intensity: 0.3 } },
+    });
+    assert.equal(activityInputs.length, 2);
+    assert.deepEqual(activityInputs[0], activityInputs[1]);
+    assert.equal(activityInputs[0].maxEdge, 1024);
+    assert.equal(activityInputs[0].id, source.id);
+    assert.equal(activityInputs[0].sourceKey, source.sourceKey);
+    assert.deepEqual(activityInputs[0].hope, { algorithm: "glaze", iterations: 29, intensity: 0.3 });
+    assert(lastGoodKey);
+    assert.equal(staging.objects.has(lastGoodKey), true);
+    assert.deepEqual(Buffer.from(staging.objects.get(lastGoodKey).bytes), protectedWebp);
+    assert.equal(staging.objects.has(source.sourceKey), true);
+
+    const failedHopeCaller = await startApplyHopeCaller(
+      environment,
+      endpointName,
+      { id: source.id, hope: { algorithm: "noise", iterations: 17 } },
+      "hope-terminal-failure:" + randomUUID(),
+      "10 seconds",
+    );
+    const failedHopeOutcomePromise = failedHopeCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await withTimeout(
+      terminalFailureStarted.promise,
+      WORKFLOW_TIMEOUT_MS,
+      "terminal Hope activity did not start",
+    );
+
+    const pendingPublishCaller = await startPublishCaller(
+      environment,
+      endpointName,
+      source.id,
+      "hope-pending-publish:" + randomUUID(),
+    );
+    assert.deepEqual(await withTimeout(
+      pendingPublishCaller.result(),
+      5_000,
+      "publish signal did not complete while Hope was pending",
+    ), { result: { id: source.id } });
+    const uploadHandle = environment.client.workflow.getHandle("media-upload:" + source.id);
+    await waitFor(async () => {
+      const history = await uploadHandle.fetchHistory();
+      return history.events.some(
+        (event) => event.workflowExecutionSignaledEventAttributes?.signalName === "publishUpload",
+      );
+    }, "publish signal was not recorded");
+    terminalFailureGate.resolve();
+
+    const failedHopeOutcome = await withTimeout(
+      failedHopeOutcomePromise,
+      WORKFLOW_TIMEOUT_MS,
+      "terminal Hope activity failure did not finish",
+    );
+    assert.match(failedHopeOutcome.value.error, /HopeProcessingError/);
+    const failedKey = hopePreparedUploadKey(source.sourceKey, terminalFailureInput.requestId);
+    assert.equal(staging.objects.has(failedKey), false);
+    assert.equal(staging.objects.has(lastGoodKey), true);
+    assert.equal(staging.objects.has(source.sourceKey), true);
+    assert.equal(media.objects.has(publicKey), false);
+    assert.equal(media.putCounts.get(publicKey) ?? 0, 0);
+    assert.equal((await Promise.race([
+      uploadOutcomePromise.then(() => true),
+      delay(100).then(() => false),
+    ])), false, "failed Hope processing published the previous variant");
+
+    const clearCaller = await startApplyHopeCaller(
+      environment,
+      endpointName,
+      { id: source.id, hope: null },
+      "hope-clear:" + randomUUID(),
+      "5 seconds",
+    );
+    assert.deepEqual(await withTimeout(clearCaller.result(), 5_000, "clear Hope update did not finish"), {
+      result: { id: source.id, hope: null },
+    });
+    assert.equal(activityInputs.length, 3);
+    assert.equal(media.objects.has(publicKey), false);
+
+    const finalPublishCaller = await startPublishCaller(
+      environment,
+      endpointName,
+      source.id,
+      "hope-clear-publish:" + randomUUID(),
+    );
+    assert.deepEqual(await withTimeout(
+      finalPublishCaller.result(),
+      5_000,
+      "publication did not resume after clear",
+    ), { result: { id: source.id } });
+    const uploadOutcome = await withTimeout(uploadOutcomePromise, WORKFLOW_TIMEOUT_MS, "cleared upload did not publish");
+    assert.equal(uploadOutcome.error, undefined);
+    assert.equal(uploadOutcome.value.upload.id, source.id);
+    assert.deepEqual(media.objects.get(publicKey).bytes, defaultBytes);
+    assert.notDeepEqual(media.objects.get(publicKey).bytes, protectedWebp);
+    assert.equal(staging.objects.has(lastGoodKey), false);
+    assert.equal(staging.objects.has(failedKey), false);
+    assert.equal(staging.objects.has(defaultKey), false);
+    assert.equal(staging.objects.has(source.sourceKey), false);
+
+    const scopedDeletes = staging.deleteKeys.filter((key) =>
+      key === source.sourceKey || key === defaultKey || key.startsWith(source.sourceKey + ".hope/"),
+    );
+    const defaultDeleteIndex = scopedDeletes.indexOf(defaultKey);
+    const sourceDeleteIndex = scopedDeletes.lastIndexOf(source.sourceKey);
+    const hopeDeleteKeys = scopedDeletes.filter((key) => key.startsWith(source.sourceKey + ".hope/"));
+    assert(defaultDeleteIndex >= 0 && sourceDeleteIndex > defaultDeleteIndex);
+    assert(hopeDeleteKeys.every((key) => scopedDeletes.indexOf(key) < defaultDeleteIndex));
+    assert.deepEqual(hopeDeleteKeys, [lastGoodKey, failedKey]);
+
+    const histories = await Promise.all([
+      successfulHopeCaller.fetchHistory(),
+      failedHopeCaller.fetchHistory(),
+      clearCaller.fetchHistory(),
+    ]);
+    assert.equal(JSON.stringify({ upload: await uploadHandle.fetchHistory(), histories })
+      .includes("HopeProcessingError"), true);
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    terminalFailureGate.resolve();
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    if (hopeWorker) await stopWorker(hopeWorker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
+test("Hope expiry cancels queued processing and caller cancellation drains an in-flight private write", async () => {
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const endpointName = "media-hope-cancel-test-" + randomUUID();
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
+  const expiring = newUpload();
+  const cancelled = newUpload();
+  const expiryGate = deferred();
+  const expiringActivityStarted = deferred();
+  const cancelledPrivateWrite = deferred();
+  const privateWriteStarted = deferred();
+  const workerCancellationReceived = deferred();
+  const protectedWebp = await sharp(PNG_1X1).webp().toBuffer();
+  let privateWriteKey;
+  let expiringHopeKey;
+  let worker;
+  let hopeWorker;
+
+  try {
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      undefined,
+      [createMediaServiceHandler({ hopeEnabled: true })],
+    );
+    hopeWorker = await startHopeWorker(
+      environment,
+      async (activityInput, cancellationSignal) => {
+        if (activityInput.id === expiring.id) {
+          expiringHopeKey = hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId);
+          expiringActivityStarted.resolve(activityInput);
+          await Promise.race([
+            expiryGate.promise,
+            new Promise((resolve) => {
+              if (cancellationSignal.aborted) resolve();
+              else cancellationSignal.addEventListener("abort", resolve, { once: true });
+            }),
+          ]);
+          cancellationSignal.throwIfAborted();
+          return;
+        }
+
+        assert.equal(activityInput.id, cancelled.id);
+        const hopeKey = hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId);
+        cancellationSignal.addEventListener("abort", () => workerCancellationReceived.resolve(), { once: true });
+        await staging.putStream(
+          hopeKey,
+          Readable.from([protectedWebp]),
+          protectedWebp.byteLength,
+          {
+            onlyIf: new Headers({ "If-None-Match": "*" }),
+            httpMetadata: { contentType: "image/webp" },
+          },
+        );
+        privateWriteKey = hopeKey;
+        cancellationSignal.throwIfAborted();
+      },
+      workerFailures,
+    );
+
+    const expiringDefaultKey = preparedKey(expiring.sourceKey);
+    const expiringPublicKey = "original/" + expiring.id + ".webp";
+    const remainingLifetimeMs = 12_500;
+    staging.seed(
+      expiring.sourceKey,
+      PNG_1X1,
+      new Date(Date.now() - 24 * 60 * 60 * 1000 + remainingLifetimeMs),
+    );
+    const expiringCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(expiring.id, expiring.sourceKey),
+      "hope-expiring-upload:" + randomUUID(),
+    );
+    const expiringOutcomePromise = expiringCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await waitFor(() => staging.objects.has(expiringDefaultKey), "expiring image was not prepared");
+    const expiringHopeCaller = await startApplyHopeCaller(
+      environment,
+      endpointName,
+      { id: expiring.id, hope: { algorithm: "noise", iterations: 8 } },
+      "hope-expiring-update:" + randomUUID(),
+      "30 seconds",
+    );
+    const expiringHopeOutcomePromise = expiringHopeCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    const expiringActivityInput = await withTimeout(
+      expiringActivityStarted.promise,
+      WORKFLOW_TIMEOUT_MS,
+      "expiring Hope activity did not start",
+    );
+    assert.equal(expiringActivityInput.maxEdge, 1024);
+    const expiringOutcome = await withTimeout(
+      expiringOutcomePromise,
+      remainingLifetimeMs + 10_000,
+      "upload did not expire while external processing was blocked",
+    );
+    assert.equal(expiringOutcome.error, undefined);
+    assert.match(expiringOutcome.value.error, /upload expired before publication/i);
+    const expiringHopeOutcome = await withTimeout(
+      expiringHopeOutcomePromise,
+      WORKFLOW_TIMEOUT_MS,
+      "expiring Hope update did not settle",
+    );
+    assert.equal(expiringHopeOutcome.error, undefined);
+    assert.match(expiringHopeOutcome.value.error, /HopeProcessingError/);
+    assert.equal(staging.objects.has(expiring.sourceKey), false);
+    assert.equal(staging.objects.has(expiringDefaultKey), false);
+    assert.equal(staging.putStreamKeys.some((key) => key.startsWith(expiring.sourceKey + ".hope/")), false);
+    assert(expiringHopeKey);
+    assert.equal(staging.objects.has(expiringHopeKey), false);
+    assert.equal(media.putCounts.get(expiringPublicKey) ?? 0, 0);
+
+    const cancelledDefaultKey = preparedKey(cancelled.sourceKey);
+    const cancelledPublicKey = "original/" + cancelled.id + ".webp";
+    staging.seed(cancelled.sourceKey, PNG_1X1);
+    const cancelledCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(cancelled.id, cancelled.sourceKey),
+      "hope-cancelled-upload:" + randomUUID(),
+    );
+    const cancelledOutcomePromise = cancelledCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await waitFor(() => staging.objects.has(cancelledDefaultKey), "cancelled image was not prepared");
+
+    staging.putGate = {
+      matches: (key) => key.startsWith(cancelled.sourceKey + ".hope/"),
+      started: (key) => {
+        privateWriteKey = key;
+        privateWriteStarted.resolve(key);
+      },
+      promise: cancelledPrivateWrite.promise,
+    };
+    const cancelledHopeCaller = await startApplyHopeCaller(
+      environment,
+      endpointName,
+      { id: cancelled.id, hope: { algorithm: "glaze", iterations: 13 } },
+      "hope-cancelled-update:" + randomUUID(),
+      "10 seconds",
+    );
+    const cancelledHopeOutcomePromise = cancelledHopeCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await withTimeout(privateWriteStarted.promise, WORKFLOW_TIMEOUT_MS, "Hope private write did not start");
+    assert.equal(staging.objects.has(privateWriteKey), false);
+
+    await cancelledCaller.cancel();
+    await withTimeout(workerCancellationReceived.promise, 7_000, "external worker did not receive cancellation");
+    assert.equal((await Promise.race([
+      cancelledOutcomePromise.then(() => true),
+      delay(0).then(() => false),
+    ])), false, "caller cancellation finished before the private write drained");
+    assert.equal(staging.objects.has(privateWriteKey), false);
+    assert.equal(media.putCounts.get(cancelledPublicKey) ?? 0, 0);
+
+    cancelledPrivateWrite.resolve();
+    const cancelledOutcome = await withTimeout(
+      cancelledOutcomePromise,
+      WORKFLOW_TIMEOUT_MS,
+      "cancelled upload did not finish after the private write drained",
+    );
+    assert(cancelledOutcome.error);
+    assert.match(errorCauseChain(cancelledOutcome.error), /CancelledFailure/);
+    const cancelledHopeOutcome = await withTimeout(
+      cancelledHopeOutcomePromise,
+      WORKFLOW_TIMEOUT_MS,
+      "cancelled Hope update did not settle",
+    );
+    assert.equal(cancelledHopeOutcome.error, undefined);
+    assert.match(cancelledHopeOutcome.value.error, /HopeProcessingError/);
+    const cancelledHistory = await environment.client.workflow.getHandle("media-upload:" + cancelled.id).fetchHistory();
+    assert(cancelledHistory.events.some((event) => event.workflowExecutionCanceledEventAttributes));
+    assert.equal(staging.objects.has(privateWriteKey), false);
+    assert.equal(staging.objects.has(cancelled.sourceKey), false);
+    assert.equal(staging.objects.has(cancelledDefaultKey), false);
+    assert.equal(media.putCounts.get(cancelledPublicKey) ?? 0, 0);
+    const completedPutStreamCount = staging.putStreamKeys.length;
+    await delay(100);
+    assert.equal(staging.putStreamKeys.length, completedPutStreamCount);
+
+    for (const [sourceKey, defaultKey] of [
+      [expiring.sourceKey, expiringDefaultKey],
+      [cancelled.sourceKey, cancelledDefaultKey],
+    ]) {
+      const scopedDeletes = staging.deleteKeys.filter((key) =>
+        key === sourceKey || key === defaultKey || key.startsWith(sourceKey + ".hope/"),
+      );
+      const defaultDeleteIndex = scopedDeletes.indexOf(defaultKey);
+      const sourceDeleteIndex = scopedDeletes.lastIndexOf(sourceKey);
+      assert(defaultDeleteIndex >= 0 && sourceDeleteIndex > defaultDeleteIndex);
+      assert(scopedDeletes.filter((key) => key.startsWith(sourceKey + ".hope/"))
+        .every((key) => scopedDeletes.indexOf(key) < defaultDeleteIndex));
+    }
+
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    expiryGate.resolve();
+    cancelledPrivateWrite.resolve();
+    staging.putGate = undefined;
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    if (hopeWorker) await stopWorker(hopeWorker).catch(() => undefined);
     await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
     await environment.teardown();
   }

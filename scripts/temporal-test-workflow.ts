@@ -6,10 +6,14 @@ import {
   isCancellation,
   setHandler,
 } from "@temporalio/workflow";
-import type { ProcessUploadInput, ProcessUploadResult } from "../src/temporal/types";
+import type {
+  ProcessUploadInput,
+  ProcessUploadResult,
+  ApplyHopeInput,
+} from "../src/temporal/types";
 import { mediaService } from "../src/temporal/service";
 
-export { processUploadWorkflow } from "../src/temporal/workflow";
+export { processUploadWorkflow, applyHopeWorkflow } from "../src/temporal/workflow";
 
 const finishSignal = defineSignal("finishNexusUploadTest");
 
@@ -103,6 +107,23 @@ export async function nexusUploadCallerWorkflow(
       return await rethrowAfterUploadCancellation(error, resultPromise);
     }
     return { error: errorMessage(error), publishResults };
+  }
+}
+
+export async function nexusApplyHopeCallerWorkflow(
+  endpoint: string,
+  input: ApplyHopeInput,
+  scheduleToCloseTimeout = "25 hours",
+) {
+  const client = createNexusServiceClient({ service: mediaService, endpoint });
+  try {
+    return {
+      result: await client.executeOperation("applyHope", input, {
+        scheduleToCloseTimeout,
+      }),
+    };
+  } catch (error) {
+    return { error: errorMessage(error) };
   }
 }
 

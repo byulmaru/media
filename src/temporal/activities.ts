@@ -3,12 +3,13 @@ import { ApplicationFailure } from "@temporalio/activity";
 import { IMMUTABLE_CACHE_CONTROL } from "../constants";
 import { HttpError } from "../errors";
 import { ensurePreparedUpload } from "../prepare-upload.node";
-import { preparedUploadKey } from "../prepared-upload";
+import { hopePreparedUploadKey, preparedUploadKey } from "../prepared-upload";
 import type { R2S3MediaStorage } from "../storage/r2-s3";
 import type { UploadStagingStorage } from "../storage/staging";
 import type {
   ProcessUploadInput,
   ProcessUploadResult,
+  PublishPreparedUploadInput,
   UploadSourceCleanupInput,
 } from "./types";
 import {
@@ -17,7 +18,11 @@ import {
   UPLOAD_VALIDATION_CODES,
   UPLOAD_VALIDATION_ERROR_TYPE,
 } from "./types";
-import { parseProcessUploadInput, parseUploadSourceCleanupInput } from "./validation";
+import {
+  parseProcessUploadInput,
+  parsePublishPreparedUploadInput,
+  parseUploadSourceCleanupInput,
+} from "./validation";
 
 const validationCodes: ReadonlySet<string> = new Set(UPLOAD_VALIDATION_CODES);
 
@@ -60,8 +65,11 @@ export function createUploadProcessingActivities(
   media: Pick<R2S3MediaStorage, "head" | "putStream">,
   publicBaseUrl: string,
 ) {
-  async function publishPreparedUpload(input: ProcessUploadInput): Promise<ProcessUploadResult> {
+  async function publishPreparedUpload(input: PublishPreparedUploadInput): Promise<ProcessUploadResult> {
     const outputKey = `original/${input.id}.webp`;
+    const stagingKey = input.hopeRequestId
+      ? hopePreparedUploadKey(input.sourceKey, input.hopeRequestId)
+      : preparedUploadKey(input.sourceKey);
     const result: ProcessUploadResult = {
       id: input.id,
       url: `${publicBaseUrl}/${outputKey}`,
@@ -69,7 +77,7 @@ export function createUploadProcessingActivities(
     };
     if (await media.head(outputKey)) return result;
 
-    const prepared = await staging.getStream(preparedUploadKey(input.sourceKey), "image/webp");
+    const prepared = await staging.getStream(stagingKey, "image/webp");
     if (!prepared) throw new Error("prepared upload object is missing");
     try {
       const stored = await media.putStream(
@@ -116,8 +124,8 @@ export function createUploadProcessingActivities(
       }
     },
 
-    async publishPreparedUpload(rawInput: ProcessUploadInput): Promise<ProcessUploadResult> {
-      const input = parseProcessUploadInput(rawInput);
+    async publishPreparedUpload(rawInput: PublishPreparedUploadInput): Promise<ProcessUploadResult> {
+      const input = parsePublishPreparedUploadInput(rawInput);
       if (!input) throw invalidProcessingInput();
       return publishPreparedUpload(input);
     },
@@ -145,6 +153,9 @@ export function createUploadProcessingActivities(
     async deleteUploadSource(rawInput: UploadSourceCleanupInput): Promise<void> {
       const input = parseUploadSourceCleanupInput(rawInput);
       if (!input) throw invalidProcessingInput();
+      for (const requestId of input.hopeRequestIds ?? []) {
+        await staging.delete(hopePreparedUploadKey(input.sourceKey, requestId));
+      }
       await staging.delete(preparedUploadKey(input.sourceKey));
       await staging.delete(input.sourceKey);
     },
