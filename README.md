@@ -85,11 +85,11 @@ Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포
 
 ### 선택적 Hope 보호
 
-새 Nexus upload Workflow는 게시 전에 비동기 `setHope({ id, hope })`를 호출해 보호 처리를 요청할 수 있습니다. 기존 upload Workflow에는 적용되지 않으므로 Hope를 쓰려면 새 upload를 시작해야 합니다. `algorithm`은 `noise`, `glaze`, `nightshade` 중 하나이며 `iterations`가 필요합니다 (각각 최대 500, 600, 750). `intensity`는 선택 사항이며 기본값은 `0.3`입니다. `hope: null`은 Hope 선택을 지우고 원본에서 준비한 기본 WebP를 다시 선택합니다. 호출자는 `setHope` operation의 `result()`가 성공한 뒤 `publishUpload`를 호출해야 합니다. Hope 처리가 실패하면 마지막 성공 결과는 보존되지만, 대기 중인 게시가 자동 실행되지는 않습니다. 호출자는 보호 처리를 재시도하거나 `hope: null`로 초기화한 뒤 게시할 수 있습니다.
+새 Nexus upload Workflow는 게시 전에 비동기 `applyHope({ id, hope })`를 호출해 보호 처리를 요청할 수 있습니다. 기존 upload Workflow에는 적용되지 않으므로 Hope를 쓰려면 새 upload를 시작해야 합니다. `algorithm`은 `noise`, `glaze`, `nightshade` 중 하나이며 `iterations`가 필요합니다 (각각 최대 500, 600, 750). `intensity`는 선택 사항이며 기본값은 `0.3`입니다. `hope: null`은 Hope 선택을 지우고 원본에서 준비한 기본 WebP를 다시 선택합니다. 호출자는 `applyHope` operation의 `result()`가 성공한 뒤 `publishUpload`를 호출해야 합니다. Hope 처리가 실패하면 마지막 성공 결과는 보존되지만, 대기 중인 게시가 자동 실행되지는 않습니다. 호출자는 보호 처리를 재시도하거나 `hope: null`로 초기화한 뒤 게시할 수 있습니다.
 
 Hope 입력은 서버에서 긴 변 1024px로 줄인 뒤 전송합니다. 원본 업로드의 제한은 최대 16 MiB, 긴 변 8192px, 총 16 MiPixels로 유지됩니다. 원본과 준비된 WebP 및 Hope 결과는 private staging에 두며, 공개 게시 때 선택한 WebP bytes를 재인코딩 없이 복사합니다. 원본은 Workflow가 terminal 상태가 될 때까지 보존하고, 24시간 게시 기한 뒤 정리를 시도하며 48시간 lifecycle 규칙이 남은 staging 객체를 정리하는 backstop입니다.
 
-`setHope` 요청은 별도 request-handler Deployment 없이 기존 Media Worker의 `setHopeWorkflow` Workflow Run operation을 통해 upload Workflow에 전달되고 응답을 기다립니다. `setHope` operation을 취소하면 해당 요청과 결과 대기만 취소됩니다. 이미 Workflow가 수락한 Hope 처리는 계속될 수 있습니다. 처리를 취소하고 Workflow cleanup을 시작하려면 원래 `startUpload` session을 취소합니다. 이미 실행 중인 Hope HTTP 계산은 취소되지 않고 끝날 때까지 Hope 인스턴스의 단일 요청 슬롯을 점유할 수 있습니다.
+`applyHope` 요청은 별도 request-handler Deployment 없이 기존 Media Worker의 `applyHopeWorkflow` Workflow Run operation을 통해 upload Workflow에 전달되고 응답을 기다립니다. `applyHope` operation을 취소하면 해당 요청과 결과 대기만 취소됩니다. 이미 Workflow가 수락한 Hope 처리는 계속될 수 있습니다. 처리를 취소하고 Workflow cleanup을 시작하려면 원래 `startUpload` session을 취소합니다. 이미 실행 중인 Hope HTTP 계산은 취소되지 않고 끝날 때까지 Hope 인스턴스의 단일 요청 슬롯을 점유할 수 있습니다.
 
 Helm에서 `hope.enabled: true`와 cluster에서 접근 가능한 private Hope API의 origin인 `hope.baseUrl`을 설정하고, 기존 Vault KV 경로 `secret/kubernetes/media`에 `HOPE_API_TOKEN`을 추가합니다. 원격 endpoint는 HTTPS여야 하고 HTTP는 `localhost`, `127.0.0.1`, `[::1]`에서만 허용됩니다. Chart는 같은 image digest를 쓰는 별도 `media-hope` Activity Worker를 한 개의 replica와 한 번의 동시 실행으로 배포하며, 롤아웃은 `Recreate`로 처리합니다. `HOPE_API_TOKEN`은 Hope Worker에만 주입되며, Hope Worker replica 수는 기존 API replica 설정과 독립적으로 1개입니다.
 
@@ -355,4 +355,4 @@ pnpm infra:validate
    ```
 
    기존 endpoint가 이 target과 같으면 그대로 둡니다. 다른 곳을 가리키면 소유자와 조율하고 이 배포에서 retarget하지 않습니다.
-8. endpoint 등록 뒤 caller Workflow에서 `mediaService.startUpload`, 선택적 `setHope`, `publishUpload`를 사용할 수 있습니다. API는 기존 `/v1` inline 경로를 유지하고 Media Worker는 `media-upload` task queue에서 Nexus operation을 처리합니다. Hope가 켜져 있으면 별도 Worker가 고정 `media-hope` task queue를 처리합니다. Deployment들은 영속 볼륨 없이 기존 R2 bucket을 사용합니다. Staging workflow는 원본 `LastModified`부터 24시간 안에 게시를 기다리고, 남은 `uploads/` 원본은 48시간 lifecycle rule이 backstop으로 정리합니다. API와 Media Worker는 CPU 100m / memory 256Mi를 요청하고 CPU 1 / memory 1Gi로 제한합니다. 서버는 SIGTERM 때 요청을 drain하지 않아 pod 교체가 진행 중인 upload를 끊을 수 있습니다.
+8. endpoint 등록 뒤 caller Workflow에서 `mediaService.startUpload`, 선택적 `applyHope`, `publishUpload`를 사용할 수 있습니다. API는 기존 `/v1` inline 경로를 유지하고 Media Worker는 `media-upload` task queue에서 Nexus operation을 처리합니다. Hope가 켜져 있으면 별도 Worker가 고정 `media-hope` task queue를 처리합니다. Deployment들은 영속 볼륨 없이 기존 R2 bucket을 사용합니다. Staging workflow는 원본 `LastModified`부터 24시간 안에 게시를 기다리고, 남은 `uploads/` 원본은 48시간 lifecycle rule이 backstop으로 정리합니다. API와 Media Worker는 CPU 100m / memory 256Mi를 요청하고 CPU 1 / memory 1Gi로 제한합니다. 서버는 SIGTERM 때 요청을 drain하지 않아 pod 교체가 진행 중인 upload를 끊을 수 있습니다.

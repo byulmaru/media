@@ -499,8 +499,8 @@ async function startCaller(environment, endpoint, input, workflowId, timeout = "
   });
 }
 
-async function startHopeCaller(environment, endpoint, input, workflowId, timeout = "25 hours") {
-  return environment.client.workflow.start("nexusSetHopeCallerWorkflow", {
+async function startApplyHopeCaller(environment, endpoint, input, workflowId, timeout = "25 hours") {
+  return environment.client.workflow.start("nexusApplyHopeCallerWorkflow", {
     workflowId,
     taskQueue: TASK_QUEUE,
     args: [endpoint, input, timeout],
@@ -1375,7 +1375,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
   }
 });
 
-test("Nexus Hope updates prepare a bounded private variant before publishing", async () => {
+test("Nexus applyHope requests prepare a bounded private variant before publishing", async () => {
   const workflowBundle = await bundleWorkflowCode({
     workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
   });
@@ -1445,13 +1445,13 @@ test("Nexus Hope updates prepare a bounded private variant before publishing", a
 
     pendingHopeResponse = deferred();
     responses.push(() => pendingHopeResponse.promise);
-    const hopeCaller = await startHopeCaller(
+    const applyHopeCaller = await startApplyHopeCaller(
       environment,
       endpointName,
       { id: source.id, hope: { algorithm: "noise", iterations: 37, intensity: 0.65 } },
       `hope-update:${randomUUID()}`,
     );
-    const hopeOutcomePromise = hopeCaller.result().then(
+    const hopeOutcomePromise = applyHopeCaller.result().then(
       (value) => ({ value }),
       (error) => ({ error }),
     );
@@ -1478,9 +1478,9 @@ test("Nexus Hope updates prepare a bounded private variant before publishing", a
     assert.equal((await Promise.race([
       hopeOutcomePromise.then(() => true),
       delay(0).then(() => false),
-    ])), false, "setHope returned before Hope finished");
+    ])), false, "applyHope returned before Hope finished");
 
-    const busyCaller = await startHopeCaller(
+    const busyCaller = await startApplyHopeCaller(
       environment,
       endpointName,
       { id: source.id, hope: { algorithm: "glaze", iterations: 8 } },
@@ -1546,7 +1546,7 @@ test("Nexus Hope updates prepare a bounded private variant before publishing", a
 
     const historyText = JSON.stringify({
       upload: await uploadHandle.fetchHistory(),
-      hope: await hopeCaller.fetchHistory(),
+      hope: await applyHopeCaller.fetchHistory(),
       busy: await busyCaller.fetchHistory(),
       publish: await publishCaller.fetchHistory(),
       failures: workerFailures,
@@ -1567,7 +1567,7 @@ test("Nexus Hope updates prepare a bounded private variant before publishing", a
   }
 });
 
-test("Nexus Hope retries transient responses, blocks stale publication on failure, and clears to default", async () => {
+test("Nexus applyHope retries transient responses, blocks stale publication on failure, and clears to default", async () => {
   const workflowBundle = await bundleWorkflowCode({
     workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
   });
@@ -1632,7 +1632,7 @@ test("Nexus Hope retries transient responses, blocks stale publication on failur
       { status: 503, headers: { "content-type": "text/plain" }, body: "try again" },
       { body: responseWebp },
     );
-    const successfulHopeCaller = await startHopeCaller(
+    const successfulHopeCaller = await startApplyHopeCaller(
       environment,
       endpointName,
       { id: source.id, hope: { algorithm: "glaze", iterations: 29 } },
@@ -1663,7 +1663,7 @@ test("Nexus Hope retries transient responses, blocks stale publication on failur
 
     pendingFailureResponse = deferred();
     responses.push(() => pendingFailureResponse.promise);
-    const failedStatusCaller = await startHopeCaller(
+    const failedStatusCaller = await startApplyHopeCaller(
       environment,
       endpointName,
       { id: source.id, hope: { algorithm: "noise", iterations: 17 } },
@@ -1720,7 +1720,7 @@ test("Nexus Hope retries transient responses, blocks stale publication on failur
     async function expectRejectedHope(reply, type, label) {
       const requestCount = hopeServer.requests.length;
       responses.push(reply);
-      const caller = await startHopeCaller(
+      const caller = await startApplyHopeCaller(
         environment,
         endpointName,
         { id: source.id, hope: { algorithm: "nightshade", iterations: 11 } },
@@ -1745,7 +1745,7 @@ test("Nexus Hope retries transient responses, blocks stale publication on failur
     await expectRejectedHope({ body: Buffer.alloc(DEFAULT_MAX_BYTES + 1) }, "HopeOutputError", "oversized");
 
     const requestCountBeforeClear = hopeServer.requests.length;
-    const clearCaller = await startHopeCaller(
+    const clearCaller = await startApplyHopeCaller(
       environment,
       endpointName,
       { id: source.id, hope: null },
@@ -1870,7 +1870,7 @@ test("Hope expiry cancels a blocked fetch and caller cancellation drains an in-f
     await waitFor(() => staging.objects.has(expiringDefaultKey), "expiring image was not prepared");
     pendingExpiryResponse = deferred();
     responses.push(() => pendingExpiryResponse.promise);
-    const expiringHopeCaller = await startHopeCaller(
+    const expiringHopeCaller = await startApplyHopeCaller(
       environment,
       endpointName,
       { id: expiring.id, hope: { algorithm: "noise", iterations: 8 } },
@@ -1926,7 +1926,7 @@ test("Hope expiry cancels a blocked fetch and caller cancellation drains an in-f
     };
     privateWrite = privateWriteGate;
     responses.push({ body: responseWebp });
-    const cancelledHopeCaller = await startHopeCaller(
+    const cancelledHopeCaller = await startApplyHopeCaller(
       environment,
       endpointName,
       { id: cancelled.id, hope: { algorithm: "glaze", iterations: 13 } },

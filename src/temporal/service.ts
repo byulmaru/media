@@ -3,8 +3,8 @@ import { operation, service } from "nexus-rpc";
 import type {
   ProcessUploadInput,
   ProcessUploadResult,
-  SetHopeInput,
-  SetHopeResult,
+  ApplyHopeInput,
+  ApplyHopeResult,
   PublishUploadInput,
   PublishUploadResult,
 } from "./types";
@@ -17,5 +17,5 @@ const uploadOperations = {
 export const mediaServiceWithoutHope = service("media", uploadOperations);
 export const mediaService = service("media", {
   ...uploadOperations,
-  setHope: operation<SetHopeInput, SetHopeResult>(),
+  applyHope: operation<ApplyHopeInput, ApplyHopeResult>(),
 });

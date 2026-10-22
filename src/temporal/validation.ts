@@ -7,16 +7,16 @@ import type {
   PublishUploadInput,
   HopeProcessingInput,
   NormalizedHopeOptions,
-  SetHopeResult,
-  SetHopeRequestEnvelope,
-  SetHopeRequestSignal,
-  SetHopeWorkflowReply,
+  ApplyHopeResult,
+  ApplyHopeRequestEnvelope,
+  ApplyHopeRequestSignal,
+  ApplyHopeWorkflowReply,
   UploadSourceCleanupInput,
 } from "./types";
 import {
   HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH,
-  SET_HOPE_REPLY_ERROR_TYPES,
-  SET_HOPE_WORKFLOW_ID_PREFIX,
+  APPLY_HOPE_REPLY_ERROR_TYPES,
+  APPLY_HOPE_WORKFLOW_ID_PREFIX,
 } from "./types";
 
 const uploadIdSchema = z.string().regex(
@@ -73,28 +73,28 @@ export const hopeOptionsSchema = z.discriminatedUnion("algorithm", [
   }),
 ]);
 
-export const setHopeInputSchema = z.strictObject({
+export const applyHopeInputSchema = z.strictObject({
   id: uploadIdSchema,
   hope: hopeOptionsSchema.nullable(),
 });
 
-const setHopeRequestEnvelopeSchema = z.object({
+const applyHopeRequestEnvelopeSchema = z.object({
   requestId: uuidSchema,
   replyWorkflowId: z.string().min(1).max(HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH),
 });
 
-const setHopeRequestSignalSchema = z.strictObject({
+const applyHopeRequestSignalSchema = z.strictObject({
   requestId: uuidSchema,
   replyWorkflowId: z.string().min(1).max(HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH),
   hope: z.unknown(),
 });
 
-const setHopeWorkflowReplySchema = z.union([
+const applyHopeWorkflowReplySchema = z.union([
   z.strictObject({ requestId: uuidSchema, result: z.unknown() }),
   z.strictObject({
     requestId: uuidSchema,
     error: z.strictObject({
-      type: z.enum(SET_HOPE_REPLY_ERROR_TYPES),
+      type: z.enum(APPLY_HOPE_REPLY_ERROR_TYPES),
       message: z.string().min(1).max(200),
     }),
   }),
@@ -135,34 +135,34 @@ export function parseHopeOptions(input: unknown): NormalizedHopeOptions | undefi
   return parsed.success ? parsed.data : undefined;
 }
 
-export function parseSetHopeInput(input: unknown): SetHopeResult | undefined {
-  const parsed = setHopeInputSchema.safeParse(input);
+export function parseApplyHopeInput(input: unknown): ApplyHopeResult | undefined {
+  const parsed = applyHopeInputSchema.safeParse(input);
   return parsed.success ? parsed.data : undefined;
 }
 
-function isSetHopeReplyWorkflowId(uploadId: string, workflowId: string): boolean {
-  const prefix = `${SET_HOPE_WORKFLOW_ID_PREFIX}${uploadId}:`;
+function isApplyHopeReplyWorkflowId(uploadId: string, workflowId: string): boolean {
+  const prefix = `${APPLY_HOPE_WORKFLOW_ID_PREFIX}${uploadId}:`;
   const suffix = workflowId.slice(prefix.length);
   return workflowId.startsWith(prefix) && suffix.length > 0 &&
     /^(?:[A-Za-z0-9_.!~*'()-]|%[0-9a-f]{2})+$/i.test(suffix);
 }
 
-export function parseSetHopeRequestEnvelope(
+export function parseApplyHopeRequestEnvelope(
   uploadId: string,
   input: unknown,
-): SetHopeRequestEnvelope | undefined {
-  const parsed = setHopeRequestEnvelopeSchema.safeParse(input);
-  return parsed.success && isSetHopeReplyWorkflowId(uploadId, parsed.data.replyWorkflowId)
+): ApplyHopeRequestEnvelope | undefined {
+  const parsed = applyHopeRequestEnvelopeSchema.safeParse(input);
+  return parsed.success && isApplyHopeReplyWorkflowId(uploadId, parsed.data.replyWorkflowId)
     ? parsed.data
     : undefined;
 }
 
-export function parseSetHopeRequestSignal(
+export function parseApplyHopeRequestSignal(
   uploadId: string,
   input: unknown,
-): SetHopeRequestSignal | undefined {
-  const parsed = setHopeRequestSignalSchema.safeParse(input);
-  if (!parsed.success || !isSetHopeReplyWorkflowId(uploadId, parsed.data.replyWorkflowId)) {
+): ApplyHopeRequestSignal | undefined {
+  const parsed = applyHopeRequestSignalSchema.safeParse(input);
+  if (!parsed.success || !isApplyHopeReplyWorkflowId(uploadId, parsed.data.replyWorkflowId)) {
     return undefined;
   }
   if (parsed.data.hope === null) return { ...parsed.data, hope: null };
@@ -176,12 +176,12 @@ export function parseSetHopeRequestSignal(
   return hope ? { ...parsed.data, hope } : undefined;
 }
 
-export function parseSetHopeWorkflowReply(
+export function parseApplyHopeWorkflowReply(
   uploadId: string,
   requestId: string,
   input: unknown,
-): SetHopeWorkflowReply | undefined {
-  const parsed = setHopeWorkflowReplySchema.safeParse(input);
+): ApplyHopeWorkflowReply | undefined {
+  const parsed = applyHopeWorkflowReplySchema.safeParse(input);
   if (!parsed.success || parsed.data.requestId !== requestId) return undefined;
   if ("error" in parsed.data) return parsed.data;
 
@@ -196,7 +196,7 @@ export function parseSetHopeWorkflowReply(
   ) {
     return undefined;
   }
-  const normalizedResult = parseSetHopeInput(result);
+  const normalizedResult = parseApplyHopeInput(result);
   return normalizedResult?.id === uploadId
     ? { requestId, result: normalizedResult }
     : undefined;

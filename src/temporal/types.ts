@@ -1,16 +1,16 @@
 export const PROCESS_UPLOAD_WORKFLOW_TYPE = "processUploadWorkflow";
 export const PUBLISH_UPLOAD_SIGNAL_NAME = "publishUpload";
-export const SET_HOPE_WORKFLOW_TYPE = "setHopeWorkflow";
-export const SET_HOPE_WORKFLOW_ID_PREFIX = "media-set-hope:";
-export const SET_HOPE_REQUEST_SIGNAL_NAME = "setHopeRequest";
-export const SET_HOPE_RESULT_SIGNAL_NAME = "setHopeResult";
+export const APPLY_HOPE_WORKFLOW_TYPE = "applyHopeWorkflow";
+export const APPLY_HOPE_WORKFLOW_ID_PREFIX = "media-apply-hope:";
+export const APPLY_HOPE_REQUEST_SIGNAL_NAME = "applyHopeRequest";
+export const APPLY_HOPE_RESULT_SIGNAL_NAME = "applyHopeResult";
 export const HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH = 512;
 export const UPLOAD_VALIDATION_ERROR_TYPE = "UploadValidationError";
 export const UPLOAD_PROCESSING_INPUT_ERROR_TYPE = "UploadProcessingInputError";
 export const UPLOAD_SOURCE_ERROR_TYPE = "UploadSourceError";
 export const UPLOAD_EXPIRED_ERROR_TYPE = "UploadExpiredError";
 export const HOPE_PROCESSING_ERROR_TYPE = "HopeProcessingError";
-export const SET_HOPE_REPLY_ERROR_TYPES = [
+export const APPLY_HOPE_REPLY_ERROR_TYPES = [
   HOPE_PROCESSING_ERROR_TYPE,
   UPLOAD_EXPIRED_ERROR_TYPE,
   UPLOAD_PROCESSING_INPUT_ERROR_TYPE,
@@ -75,12 +75,12 @@ export interface NormalizedHopeOptions extends HopeOptions {
   intensity: number;
 }
 
-export interface SetHopeInput {
+export interface ApplyHopeInput {
   id: string;
   hope: HopeOptions | null;
 }
 
-export interface SetHopeResult {
+export interface ApplyHopeResult {
   id: string;
   hope: NormalizedHopeOptions | null;
 }
@@ -90,25 +90,25 @@ export interface HopeProcessingInput extends ProcessUploadInput {
   hope: NormalizedHopeOptions;
 }
 
-export interface SetHopeRequestSignal {
+export interface ApplyHopeRequestSignal {
   requestId: string;
   replyWorkflowId: string;
   hope: NormalizedHopeOptions | null;
 }
 
-export type SetHopeWorkflowReply =
-  | { requestId: string; result: SetHopeResult }
+export type ApplyHopeWorkflowReply =
+  | { requestId: string; result: ApplyHopeResult }
   | {
       requestId: string;
-      error: SetHopeWorkflowFailure;
+      error: ApplyHopeWorkflowFailure;
     };
 
-export interface SetHopeWorkflowFailure {
-  type: typeof SET_HOPE_REPLY_ERROR_TYPES[number];
+export interface ApplyHopeWorkflowFailure {
+  type: typeof APPLY_HOPE_REPLY_ERROR_TYPES[number];
   message: string;
 }
 
-export interface SetHopeRequestEnvelope {
+export interface ApplyHopeRequestEnvelope {
   requestId: string;
   replyWorkflowId: string;
 }

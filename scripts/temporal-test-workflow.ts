@@ -9,11 +9,11 @@ import {
 import type {
   ProcessUploadInput,
   ProcessUploadResult,
-  SetHopeInput,
+  ApplyHopeInput,
 } from "../src/temporal/types";
 import { mediaService } from "../src/temporal/service";
 
-export { processUploadWorkflow, setHopeWorkflow } from "../src/temporal/workflow";
+export { processUploadWorkflow, applyHopeWorkflow } from "../src/temporal/workflow";
 
 const finishSignal = defineSignal("finishNexusUploadTest");
 
@@ -110,15 +110,15 @@ export async function nexusUploadCallerWorkflow(
   }
 }
 
-export async function nexusSetHopeCallerWorkflow(
+export async function nexusApplyHopeCallerWorkflow(
   endpoint: string,
-  input: SetHopeInput,
+  input: ApplyHopeInput,
   scheduleToCloseTimeout = "25 hours",
 ) {
   const client = createNexusServiceClient({ service: mediaService, endpoint });
   try {
     return {
-      result: await client.executeOperation("setHope", input, {
+      result: await client.executeOperation("applyHope", input, {
         scheduleToCloseTimeout,
       }),
     };

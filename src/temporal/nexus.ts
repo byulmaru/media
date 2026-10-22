@@ -6,22 +6,22 @@ import {
 } from "@temporalio/nexus";
 import { HandlerError, serviceHandler } from "nexus-rpc";
 
-import type { processUploadWorkflow, setHopeWorkflow } from "./workflow";
+import type { processUploadWorkflow, applyHopeWorkflow } from "./workflow";
 import {
   HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH,
   PROCESS_UPLOAD_WORKFLOW_TYPE,
   PUBLISH_UPLOAD_SIGNAL_NAME,
-  SET_HOPE_WORKFLOW_ID_PREFIX,
-  SET_HOPE_WORKFLOW_TYPE,
+  APPLY_HOPE_WORKFLOW_ID_PREFIX,
+  APPLY_HOPE_WORKFLOW_TYPE,
 } from "./types";
 import type {
   ProcessUploadInput,
   ProcessUploadResult,
   PublishUploadResult,
-  SetHopeInput,
-  SetHopeResult,
+  ApplyHopeInput,
+  ApplyHopeResult,
 } from "./types";
-import { parseProcessUploadInput, parsePublishUploadInput, parseSetHopeInput } from "./validation";
+import { parseProcessUploadInput, parsePublishUploadInput, parseApplyHopeInput } from "./validation";
 import { mediaService, mediaServiceWithoutHope } from "./service";
 
 const startUploadHandler = new WorkflowRunOperationHandler<ProcessUploadInput, ProcessUploadResult>(
@@ -81,9 +81,9 @@ async function publishUpload(_ctx: unknown, rawInput: unknown): Promise<PublishU
   return { id: input.id };
 }
 
-const setHopeHandler = new WorkflowRunOperationHandler<SetHopeInput, SetHopeResult>(
+const applyHopeHandler = new WorkflowRunOperationHandler<ApplyHopeInput, ApplyHopeResult>(
   async (ctx, rawInput) => {
-    const input = parseSetHopeInput(rawInput);
+    const input = parseApplyHopeInput(rawInput);
     if (!input) {
       throw new HandlerError("BAD_REQUEST", "Hope options are invalid", {
         retryableOverride: false,
@@ -98,13 +98,13 @@ const setHopeHandler = new WorkflowRunOperationHandler<SetHopeInput, SetHopeResu
         retryableOverride: false,
       });
     }
-    const workflowId = `${SET_HOPE_WORKFLOW_ID_PREFIX}${input.id}:${requestId}`;
+    const workflowId = `${APPLY_HOPE_WORKFLOW_ID_PREFIX}${input.id}:${requestId}`;
     if (!ctx.requestId || workflowId.length > HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH) {
       throw new HandlerError("BAD_REQUEST", "Hope request ID is invalid", {
         retryableOverride: false,
       });
     }
-    return await startWorkflow<typeof setHopeWorkflow>(ctx, SET_HOPE_WORKFLOW_TYPE, {
+    return await startWorkflow<typeof applyHopeWorkflow>(ctx, APPLY_HOPE_WORKFLOW_TYPE, {
       args: [input],
       workflowId,
       workflowIdConflictPolicy: "USE_EXISTING",
@@ -119,7 +119,7 @@ export function createMediaServiceHandler(options: { hopeEnabled?: boolean } = {
     return serviceHandler(mediaService, {
       startUpload: startUploadHandler,
       publishUpload,
-      setHope: setHopeHandler,
+      applyHope: applyHopeHandler,
     });
   }
   return serviceHandler(mediaServiceWithoutHope, {

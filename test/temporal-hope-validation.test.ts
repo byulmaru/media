@@ -1,23 +1,23 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  parseSetHopeInput,
-  parseSetHopeRequestEnvelope,
-  parseSetHopeRequestSignal,
-  parseSetHopeWorkflowReply,
+  parseApplyHopeInput,
+  parseApplyHopeRequestEnvelope,
+  parseApplyHopeRequestSignal,
+  parseApplyHopeWorkflowReply,
 } from "../src/temporal/validation";
 import { hopeWorkerConfigSchema } from "../src/temporal/hope-config";
 
 const uploadId = "u_00000000-0000-4000-8000-000000000000";
 const otherUploadId = "u_00000000-0000-4000-8000-000000000001";
 const requestId = "00000000-0000-4000-8000-000000000001";
-const replyWorkflowId = `media-set-hope:${uploadId}:${requestId}`;
+const replyWorkflowId = `media-apply-hope:${uploadId}:${requestId}`;
 
-describe("Hope request validation", () => {
+describe("applyHope request validation", () => {
   it("defaults intensity and accepts clearing to the unprotected variant", () => {
-    expect(parseSetHopeInput({ id: uploadId, hope: { algorithm: "glaze", iterations: 29 } }))
+    expect(parseApplyHopeInput({ id: uploadId, hope: { algorithm: "glaze", iterations: 29 } }))
       .toEqual({ id: uploadId, hope: { algorithm: "glaze", iterations: 29, intensity: 0.3 } });
-    expect(parseSetHopeInput({ id: uploadId, hope: null })).toEqual({ id: uploadId, hope: null });
+    expect(parseApplyHopeInput({ id: uploadId, hope: null })).toEqual({ id: uploadId, hope: null });
   });
 
   it.each([
@@ -27,24 +27,24 @@ describe("Hope request validation", () => {
     ["zero intensity", { algorithm: "nightshade", iterations: 10, intensity: 0 }],
     ["unknown option", { algorithm: "noise", iterations: 10, extra: true }],
   ] as const)("rejects %s", (_name, hope) => {
-    expect(parseSetHopeInput({ id: uploadId, hope })).toBeUndefined();
+    expect(parseApplyHopeInput({ id: uploadId, hope })).toBeUndefined();
   });
 
   it("rejects malformed upload IDs", () => {
-    expect(parseSetHopeInput({ id: "not-an-upload-id", hope: null })).toBeUndefined();
+    expect(parseApplyHopeInput({ id: "not-an-upload-id", hope: null })).toBeUndefined();
   });
 });
 
-describe("internal Hope request and reply validation", () => {
+describe("internal applyHope request and reply validation", () => {
   it.each([
     ["correlated request envelope", { requestId, replyWorkflowId }, true],
     ["cross-upload reply workflow", {
       requestId,
-      replyWorkflowId: `media-set-hope:${otherUploadId}:${requestId}`,
+      replyWorkflowId: `media-apply-hope:${otherUploadId}:${requestId}`,
     }, false],
     ["invalid request UUID", { requestId: "not-a-uuid", replyWorkflowId }, false],
   ] as const)("validates %s", (_name, envelope, valid) => {
-    expect(parseSetHopeRequestEnvelope(uploadId, envelope) !== undefined).toBe(valid);
+    expect(parseApplyHopeRequestEnvelope(uploadId, envelope) !== undefined).toBe(valid);
   });
 
   it.each([
@@ -53,7 +53,7 @@ describe("internal Hope request and reply validation", () => {
     ["malformed Hope options", { algorithm: "noise", iterations: 10, intensity: 0.3, extra: true }, false],
   ] as const)("validates %s", (_name, hope, valid) => {
     const signal = { requestId, replyWorkflowId, hope };
-    expect(parseSetHopeRequestSignal(uploadId, signal) !== undefined).toBe(valid);
+    expect(parseApplyHopeRequestSignal(uploadId, signal) !== undefined).toBe(valid);
   });
 
   it.each([
@@ -74,7 +74,7 @@ describe("internal Hope request and reply validation", () => {
       result: { id: otherUploadId, hope: { algorithm: "noise", iterations: 10, intensity: 0.3 } },
     }, false],
   ] as const)("validates %s", (_name, reply, valid) => {
-    expect(parseSetHopeWorkflowReply(uploadId, requestId, reply) !== undefined).toBe(valid);
+    expect(parseApplyHopeWorkflowReply(uploadId, requestId, reply) !== undefined).toBe(valid);
   });
 });
 

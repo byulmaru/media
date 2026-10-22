@@ -19,19 +19,19 @@ import type * as hopeActivities from "./hope-activities";
 import type {
   ProcessUploadInput,
   ProcessUploadResult,
-  SetHopeInput,
-  SetHopeRequestSignal,
-  SetHopeResult,
-  SetHopeWorkflowFailure,
-  SetHopeWorkflowReply,
+  ApplyHopeInput,
+  ApplyHopeRequestSignal,
+  ApplyHopeResult,
+  ApplyHopeWorkflowFailure,
+  ApplyHopeWorkflowReply,
 } from "./types";
 import {
   HOPE_PROCESSING_ERROR_TYPE,
   HOPE_TASK_QUEUE,
   PUBLISH_UPLOAD_SIGNAL_NAME,
-  SET_HOPE_REPLY_ERROR_TYPES,
-  SET_HOPE_REQUEST_SIGNAL_NAME,
-  SET_HOPE_RESULT_SIGNAL_NAME,
+  APPLY_HOPE_REPLY_ERROR_TYPES,
+  APPLY_HOPE_REQUEST_SIGNAL_NAME,
+  APPLY_HOPE_RESULT_SIGNAL_NAME,
   UPLOAD_EXPIRED_ERROR_TYPE,
   UPLOAD_EXPIRATION_MS,
   UPLOAD_PROCESSING_INPUT_ERROR_TYPE,
@@ -40,15 +40,15 @@ import {
 } from "./types";
 import {
   parseProcessUploadInput,
-  parseSetHopeInput,
-  parseSetHopeRequestEnvelope,
-  parseSetHopeRequestSignal,
-  parseSetHopeWorkflowReply,
+  parseApplyHopeInput,
+  parseApplyHopeRequestEnvelope,
+  parseApplyHopeRequestSignal,
+  parseApplyHopeWorkflowReply,
 } from "./validation";
 
 const publishUploadSignal = defineSignal(PUBLISH_UPLOAD_SIGNAL_NAME);
-const setHopeRequestSignal = defineSignal<[unknown]>(SET_HOPE_REQUEST_SIGNAL_NAME);
-const setHopeResultSignal = defineSignal<[unknown]>(SET_HOPE_RESULT_SIGNAL_NAME);
+const applyHopeRequestSignal = defineSignal<[unknown]>(APPLY_HOPE_REQUEST_SIGNAL_NAME);
+const applyHopeResultSignal = defineSignal<[unknown]>(APPLY_HOPE_RESULT_SIGNAL_NAME);
 
 const { getUploadSourceLastModified } = proxyActivities<Pick<
   ReturnType<typeof activities.createUploadProcessingActivities>,
@@ -126,15 +126,15 @@ function hopeUpdateError(message: string): ApplicationFailure {
   });
 }
 
-function safeSetHopeFailure(error: unknown): SetHopeWorkflowFailure {
+function safeApplyHopeFailure(error: unknown): ApplyHopeWorkflowFailure {
   let cause = error;
   while (cause instanceof Error && !(cause instanceof ApplicationFailure)) {
     cause = "cause" in cause ? cause.cause : undefined;
   }
   const originalType = cause instanceof ApplicationFailure ? cause.type : "";
   const type = typeof originalType === "string" &&
-    (SET_HOPE_REPLY_ERROR_TYPES as readonly string[]).includes(originalType)
-    ? originalType as SetHopeWorkflowFailure["type"]
+    (APPLY_HOPE_REPLY_ERROR_TYPES as readonly string[]).includes(originalType)
+    ? originalType as ApplyHopeWorkflowFailure["type"]
     : HOPE_PROCESSING_ERROR_TYPE;
   const originalMessage = cause instanceof Error ? cause.message : "";
 
@@ -170,16 +170,16 @@ function safeSetHopeFailure(error: unknown): SetHopeWorkflowFailure {
   return { type, message: "Hope service request failed" };
 }
 
-type HopeCommand = SetHopeRequestSignal;
+type HopeCommand = ApplyHopeRequestSignal;
 
-async function sendSetHopeReply(
+async function sendApplyHopeReply(
   uploadId: string,
   replyWorkflowId: string,
-  reply: SetHopeWorkflowReply,
+  reply: ApplyHopeWorkflowReply,
 ): Promise<void> {
   await CancellationScope.nonCancellable(async () => {
     try {
-      await getExternalWorkflowHandle(replyWorkflowId).signal(setHopeResultSignal, reply);
+      await getExternalWorkflowHandle(replyWorkflowId).signal(applyHopeResultSignal, reply);
     } catch {
       log.warn("Hope result delivery failed", {
         event: "hope_result_delivery_failed",
@@ -189,8 +189,8 @@ async function sendSetHopeReply(
   });
 }
 
-async function setHopeWorkflow(input: SetHopeInput): Promise<SetHopeResult> {
-  const normalized = parseSetHopeInput(input);
+async function applyHopeWorkflow(input: ApplyHopeInput): Promise<ApplyHopeResult> {
+  const normalized = parseApplyHopeInput(input);
   if (!normalized) {
     throw ApplicationFailure.create({
       message: "Hope options are invalid",
@@ -200,18 +200,18 @@ async function setHopeWorkflow(input: SetHopeInput): Promise<SetHopeResult> {
   }
 
   const requestId = uuid4();
-  const result = new Trigger<SetHopeWorkflowReply>();
-  setHandler(setHopeResultSignal, (rawReply) => {
-    const reply = parseSetHopeWorkflowReply(normalized.id, requestId, rawReply);
+  const result = new Trigger<ApplyHopeWorkflowReply>();
+  setHandler(applyHopeResultSignal, (rawReply) => {
+    const reply = parseApplyHopeWorkflowReply(normalized.id, requestId, rawReply);
     if (reply) result.resolve(reply);
   });
 
   const replyWorkflowId = workflowInfo().workflowId;
-  await getExternalWorkflowHandle(`media-upload:${normalized.id}`).signal(setHopeRequestSignal, {
+  await getExternalWorkflowHandle(`media-upload:${normalized.id}`).signal(applyHopeRequestSignal, {
     requestId,
     replyWorkflowId,
     hope: normalized.hope,
-  } satisfies SetHopeRequestSignal);
+  } satisfies ApplyHopeRequestSignal);
 
   const reply = await result;
   if ("error" in reply) {
@@ -224,7 +224,7 @@ async function setHopeWorkflow(input: SetHopeInput): Promise<SetHopeResult> {
   return reply.result;
 }
 
-export { setHopeWorkflow };
+export { applyHopeWorkflow };
 
 export async function processUploadWorkflow(input: ProcessUploadInput): Promise<ProcessUploadResult> {
   const validatedInput = parseProcessUploadInput(input);
@@ -253,8 +253,8 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
     });
 
     // Register before the first activity so an immediate Hope request can be buffered.
-    setHandler(setHopeRequestSignal, async (rawRequest) => {
-      const envelope = parseSetHopeRequestEnvelope(validatedInput.id, rawRequest);
+    setHandler(applyHopeRequestSignal, async (rawRequest) => {
+      const envelope = parseApplyHopeRequestEnvelope(validatedInput.id, rawRequest);
       if (!envelope) {
         log.warn("Invalid Hope request was dropped", {
           event: "hope_request_dropped",
@@ -263,11 +263,11 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
         return;
       }
 
-      const command = parseSetHopeRequestSignal(validatedInput.id, rawRequest);
+      const command = parseApplyHopeRequestSignal(validatedInput.id, rawRequest);
       const reject = async (error: unknown) => {
-        await sendSetHopeReply(validatedInput.id, envelope.replyWorkflowId, {
+        await sendApplyHopeReply(validatedInput.id, envelope.replyWorkflowId, {
           requestId: envelope.requestId,
-          error: safeSetHopeFailure(error),
+          error: safeApplyHopeFailure(error),
         });
       };
       if (!command) {
@@ -321,9 +321,9 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
       const command = pendingHopeCommand;
       pendingHopeCommand = undefined;
       hopeCommandBusy = false;
-      await sendSetHopeReply(validatedInput.id, command.replyWorkflowId, {
+      await sendApplyHopeReply(validatedInput.id, command.replyWorkflowId, {
         requestId: command.requestId,
-        error: safeSetHopeFailure(hopeUpdateError("Hope updates are not supported for this upload")),
+        error: safeApplyHopeFailure(hopeUpdateError("Hope updates are not supported for this upload")),
       });
       await CancellationScope.nonCancellable(() => condition(allHandlersFinished));
     }
@@ -379,7 +379,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
             }
 
             hopeFailed = false;
-            await sendSetHopeReply(validatedInput.id, command.replyWorkflowId, {
+            await sendApplyHopeReply(validatedInput.id, command.replyWorkflowId, {
               requestId: command.requestId,
               result: { id: validatedInput.id, hope: command.hope },
             });
@@ -388,9 +388,9 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
             // A failed attempt never publishes the last successful Hope artifact by accident.
             hopeFailed = true;
             published = false;
-            await sendSetHopeReply(validatedInput.id, command.replyWorkflowId, {
+            await sendApplyHopeReply(validatedInput.id, command.replyWorkflowId, {
               requestId: command.requestId,
-              error: safeSetHopeFailure(error),
+              error: safeApplyHopeFailure(error),
             });
             hopeCommandBusy = false;
           }
@@ -436,9 +436,9 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
         const command = pendingHopeCommand;
         pendingHopeCommand = undefined;
         hopeCommandBusy = false;
-        await sendSetHopeReply(validatedInput.id, command.replyWorkflowId, {
+        await sendApplyHopeReply(validatedInput.id, command.replyWorkflowId, {
           requestId: command.requestId,
-          error: safeSetHopeFailure(workflowFailure ?? hopeUpdateError("Upload workflow ended")),
+          error: safeApplyHopeFailure(workflowFailure ?? hopeUpdateError("Upload workflow ended")),
         });
       }
       await CancellationScope.nonCancellable(async () => {
