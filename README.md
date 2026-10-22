@@ -83,15 +83,23 @@ Kosmo의 staging metadata 확인을 출시할 때는 새 Media API를 모든 인
 
 Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포함하지 않습니다.
 
-### Hope 변환 연동 (계획)
+### 브라우저 편집 및 Hope 연동 (계획)
 
-아직 구현되지 않은 후속 계획입니다. 현재 media Nexus 업로드 수명주기는 그대로 유지됩니다.
+현재 구현된 기반에서는 v2 `PUT`이 원본 bytes만 private staging에 저장합니다. Workflow 시작 직후 원본을 검증하고 기본 WebP를 private staging에 준비하며, 원본은 Workflow가 terminal 상태가 될 때까지 유지됩니다. 브라우저 편집과 Hope 연결은 후속 구현이며, 작업은 [PROD-1192](https://linear.app/byulmaru/issue/PROD-1192/원본-기반-이미지-편집과-hope-처리-제한을-구현한다)에서 관리합니다.
 
-Hope Activity Worker는 같은 Temporal namespace `media`에서 실행하고, media Worker와 다른 전용 Task Queue를 사용합니다.
+편집 UI는 원본을 사용해 브라우저에서 crop/rotate 미리보기를 만들고, 사용자가 `Apply`를 선택할 때 편집 recipe를 보냅니다. 모든 변경 결과는 immutable original에서 다시 렌더링하며, 이전 lossy WebP를 다음 편집의 입력으로 쓰지 않습니다. 크기 제한은 서로 다른 단계에 독립적으로 적용합니다. Hope는 사용자가 명시적으로 적용을 요청할 때만 실행합니다.
 
-한 번에 하나씩 처리하려면 Worker별 `maxConcurrentActivityTaskExecutions`를 1로 설정하고, 롤아웃 중을 포함해 Hope Worker와 Hope HTTP instance를 각각 하나만 활성화합니다. Worker가 없을 때 대기 중인 Activity는 Temporal queue에 남습니다. Hope HTTP의 기존 semaphore 1은 인스턴스별로 timeout 뒤에도 계속되는 계산을 제한하는 guard로 유지합니다.
+| 단계 | 제한 |
+| --- | --- |
+| 원본 업로드/검증 | 기존 최대 16 MiB, 긴 변 8192px, 총 16 MiPixels |
+| Crop 뒤 Hope 입력 | Hope HTTP 호출 전에 서버가 적용하는 별도 상한 (값 미정) |
+| 최종 결과 (Hope 사용 여부와 무관) | 별도 최종 출력 상한 (Hope 없이도 적용, 값 미정) |
 
-media Workflow는 Hope queue에 변환 Activity를 예약합니다. Activity는 private R2의 source를 읽어 기존 Hope HTTP `POST /protect`를 호출하고, 반환된 WebP를 private R2에 쓴 뒤 object key/reference만 Workflow에 돌려줍니다. Hope HTTP endpoint는 R2에 쓰지 않습니다. Workflow는 결과 reference를 채택한 뒤 명시적 게시 요청을 다시 기다리며, 최종 public R2 저장은 media가 소유합니다.
+Crop이나 rotate가 바뀌면 이전 Hope 결과는 무효가 되며, 명시적인 `Apply`로 다시 준비해야 합니다. 새 준비가 실패하면 마지막 성공 결과는 보존하지만, 대기 중이거나 실패한 편집은 완료되었거나 게시 가능한 결과로 취급하지 않습니다. 게시 전에 현재 편집의 준비 성공을 기다리고, 준비된 bytes를 재인코딩 없이 복사합니다.
+
+Hope Activity Worker는 같은 Temporal namespace `media`에서 실행하고, media Worker와 다른 전용 Task Queue를 사용합니다. 한 번에 하나씩 처리하려면 Worker별 `maxConcurrentActivityTaskExecutions`를 1로 설정하고, 롤아웃 중을 포함해 Hope Worker와 Hope HTTP instance를 각각 하나만 활성화합니다. Worker가 없을 때 대기 중인 Activity는 Temporal queue에 남습니다. Hope HTTP의 기존 semaphore 1은 timeout 뒤에도 계속되는 계산을 제한하는 인스턴스별 guard로 유지합니다.
+
+media Workflow는 Hope queue에 변환 Activity를 예약합니다. Activity는 private R2에서 immutable original을 읽어 recipe를 적용한 Hope 입력을 만들어 기존 Hope HTTP `POST /protect`를 호출합니다. 반환된 WebP를 private R2에 쓴 뒤 object key/reference만 Workflow에 돌려줍니다. Hope HTTP endpoint는 R2에 쓰지 않습니다. Workflow는 현재 편집의 결과 reference를 채택한 뒤 명시적 게시 요청을 기다리며, 최종 public R2 저장은 media가 소유합니다.
 
 ## Infrastructure
 
@@ -100,7 +108,7 @@ media Workflow는 Hope queue에 변환 Activity를 예약합니다. Activity는 
 - `byulmaru-media` R2 bucket
 - `media.byulma.run` R2 custom domain
 - 공개 GET/HEAD를 위한 R2 CORS
-- `byulmaru-media-staging` private R2 bucket. Nexus workflow는 게시를 기다리고, 게시 시 staging 객체를 정리합니다. 미게시 원본은 `LastModified` 후 24시간에 정리합니다. R2 lifecycle은 workflow 중단 시 남은 `uploads/` 객체를 48시간 age threshold 이후 정리하는 backstop입니다. Cloudflare는 lifecycle 만료 뒤 보통 24시간 이내에 object를 삭제하지만, 이는 보장된 최대 지연 시간이 아닙니다. 미완료 multipart upload는 24시간 age threshold에 중단됩니다.
+- `byulmaru-media-staging` private R2 bucket. 시작된 Nexus Workflow는 raw source의 `LastModified`부터 24시간 게시 기한을 강제하고, 게시 또는 terminal cleanup에서 staging 객체를 정리합니다. Workflow가 시작되지 않았거나 정리에 실패해 남은 `uploads/` 객체는 48시간 age threshold lifecycle backstop에 맡깁니다. Cloudflare는 lifecycle 만료 뒤 보통 24시간 이내에 object를 삭제하지만, 물리 삭제까지의 최대 시간 보장은 아닙니다. 미완료 multipart upload는 24시간 age threshold에 중단됩니다.
 
 Staging bucket에는 public read, custom domain, `r2.dev` URL을 설정하지 않고, 브라우저 PUT CORS는 `https://kos.moe`, `https://dev.kos.moe`, `http://localhost:5173` origin에만 허용합니다.
 
@@ -296,9 +304,7 @@ Media Storage Service가 소유한 공개 표현 정보만 조회해야 합니�
 
 ## Security and limits
 
-- source body: 최대 16 MiB
-- 긴 변: 최대 8192px
-- 총 pixels: 최대 16 MiPixels
+- 원본 업로드/검증: 최대 16 MiB, 긴 변 8192px, 총 16 MiPixels
 - 지원 형식: JPEG, PNG, WebP
 - 출력: metadata가 제거된 WebP 품질 80
 - animation과 지원하지 않는 형식은 거부
