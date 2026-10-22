@@ -13,6 +13,11 @@ const common = {
 };
 
 await build({ ...common, entryPoints: ["src/temporal/worker.ts"], outfile: "dist/worker.js" });
+await build({
+  ...common,
+  entryPoints: ["src/temporal/hope-worker.ts"],
+  outfile: "dist/hope-worker.js",
+});
 
 const workflowBundle = await bundleWorkflowCode({
   workflowsPath: resolve("src/temporal/workflow.ts"),

@@ -18,6 +18,10 @@ temporal:
   taskQueue: media-upload
   adminToolsImage: temporalio/admin-tools@sha256:dbc5fcd6ee8f0f4d808bf765af9a87dea9d8a283abfdcfbd2fc148496ba66107
 
+hope:
+  enabled: false
+  baseUrl: ""
+
 resources:
   requests:
     cpu: 100m

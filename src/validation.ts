@@ -78,6 +78,7 @@ export const nodeServerConfigSchema = z.object({
 }).refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME);
 
 export const temporalUploadConfigSchema = z.object({
+  HOPE_ENABLED: z.stringbool().default(false),
   TEMPORAL_ADDRESS: nonWhitespaceNodeValueSchema,
   TEMPORAL_NAMESPACE: nonWhitespaceNodeValueSchema,
   TEMPORAL_TASK_QUEUE: nonWhitespaceNodeValueSchema,

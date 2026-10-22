@@ -6,7 +6,7 @@ import { createR2S3MediaStorage } from "../storage/r2-s3";
 import { createR2S3StagingStorage } from "../storage/staging";
 import { temporalUploadConfigSchema } from "../validation";
 import { createUploadProcessingActivities } from "./activities";
-import { mediaServiceHandler } from "./nexus";
+import { createMediaServiceHandler } from "./nexus";
 
 function readWorkerConfig(source: NodeJS.ProcessEnv) {
   const temporal = temporalUploadConfigSchema.safeParse(source);
@@ -40,7 +40,7 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
         codePath: fileURLToPath(new URL("./workflows.js", import.meta.url)),
       },
       activities: createUploadProcessingActivities(staging, media, config.PUBLIC_BASE_URL),
-      nexusServices: [mediaServiceHandler],
+      nexusServices: [createMediaServiceHandler({ hopeEnabled: config.HOPE_ENABLED })],
       maxConcurrentActivityTaskExecutions: 4,
     });
     await worker.run();

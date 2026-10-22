@@ -1,0 +1,148 @@
+// Frozen from 98f968e to verify prepared-before-wait histories replay through the Hope-aware workflow.
+import {
+  ApplicationFailure,
+  CancellationScope,
+  condition,
+  defineSignal,
+  log,
+  patched,
+  proxyActivities,
+  setHandler,
+} from "@temporalio/workflow";
+import type * as activities from "../../src/temporal/activities";
+import type { ProcessUploadInput, ProcessUploadResult } from "../../src/temporal/types";
+import {
+  PUBLISH_UPLOAD_SIGNAL_NAME,
+  UPLOAD_EXPIRED_ERROR_TYPE,
+  UPLOAD_EXPIRATION_MS,
+  UPLOAD_PROCESSING_INPUT_ERROR_TYPE,
+  UPLOAD_SOURCE_ERROR_TYPE,
+  UPLOAD_VALIDATION_ERROR_TYPE,
+} from "../../src/temporal/types";
+import { parseProcessUploadInput } from "../../src/temporal/validation";
+
+const publishUploadSignal = defineSignal(PUBLISH_UPLOAD_SIGNAL_NAME);
+
+const { getUploadSourceLastModified } = proxyActivities<Pick<
+  ReturnType<typeof activities.createUploadProcessingActivities>,
+  "getUploadSourceLastModified"
+>>({
+  startToCloseTimeout: "30 seconds",
+  scheduleToCloseTimeout: "5 minutes",
+  retry: {
+    initialInterval: "1 second",
+    maximumInterval: "30 seconds",
+    nonRetryableErrorTypes: [UPLOAD_PROCESSING_INPUT_ERROR_TYPE, UPLOAD_SOURCE_ERROR_TYPE],
+  },
+});
+
+const { processUploadImage, prepareUploadImage } = proxyActivities<Pick<
+  ReturnType<typeof activities.createUploadProcessingActivities>,
+  "processUploadImage" | "prepareUploadImage"
+>>({
+  startToCloseTimeout: "2 minutes",
+  scheduleToCloseTimeout: "5 minutes",
+  retry: {
+    initialInterval: "1 second",
+    maximumInterval: "30 seconds",
+    nonRetryableErrorTypes: [UPLOAD_VALIDATION_ERROR_TYPE, UPLOAD_PROCESSING_INPUT_ERROR_TYPE],
+  },
+});
+
+const { publishPreparedUpload } = proxyActivities<Pick<
+  ReturnType<typeof activities.createUploadProcessingActivities>,
+  "publishPreparedUpload"
+>>({
+  startToCloseTimeout: "2 minutes",
+  scheduleToCloseTimeout: "5 minutes",
+  retry: {
+    initialInterval: "1 second",
+    maximumInterval: "30 seconds",
+    nonRetryableErrorTypes: [UPLOAD_PROCESSING_INPUT_ERROR_TYPE],
+  },
+});
+
+const { deleteUploadSource } = proxyActivities<Pick<
+  ReturnType<typeof activities.createUploadProcessingActivities>,
+  "deleteUploadSource"
+>>({
+  startToCloseTimeout: "30 seconds",
+  scheduleToCloseTimeout: "5 minutes",
+  retry: {
+    initialInterval: "1 second",
+    maximumInterval: "30 seconds",
+    nonRetryableErrorTypes: [UPLOAD_PROCESSING_INPUT_ERROR_TYPE],
+  },
+});
+
+function uploadSourceError(): ApplicationFailure {
+  return ApplicationFailure.create({
+    message: "upload source metadata is invalid",
+    type: UPLOAD_SOURCE_ERROR_TYPE,
+    nonRetryable: true,
+  });
+}
+
+function uploadExpiredError(): ApplicationFailure {
+  return ApplicationFailure.create({
+    message: "upload expired before publication",
+    type: UPLOAD_EXPIRED_ERROR_TYPE,
+    nonRetryable: true,
+  });
+}
+
+export async function processUploadWorkflow(input: ProcessUploadInput): Promise<ProcessUploadResult> {
+  const validatedInput = parseProcessUploadInput(input);
+  if (!validatedInput) {
+    throw ApplicationFailure.create({
+      message: "upload processing input is invalid",
+      type: UPLOAD_PROCESSING_INPUT_ERROR_TYPE,
+      nonRetryable: true,
+    });
+  }
+
+  let published = false;
+  try {
+    setHandler(publishUploadSignal, () => {
+      published = true;
+    });
+
+    const uploadedAt = await getUploadSourceLastModified(validatedInput);
+    if (!Number.isFinite(uploadedAt) || uploadedAt <= 0 || uploadedAt > Date.now()) {
+      throw uploadSourceError();
+    }
+
+    const deadline = uploadedAt + UPLOAD_EXPIRATION_MS;
+    if (!Number.isFinite(deadline)) throw uploadSourceError();
+    if (Date.now() >= deadline) throw uploadExpiredError();
+
+    const usePreparedPublication = patched("prepare-private-webp-before-publish");
+    if (usePreparedPublication) {
+      await prepareUploadImage(validatedInput);
+      if (Date.now() >= deadline) throw uploadExpiredError();
+    }
+
+    if (!published) {
+      if (!(await condition(() => published, Math.max(0, deadline - Date.now())))) {
+        throw uploadExpiredError();
+      }
+      if (Date.now() >= deadline) throw uploadExpiredError();
+    }
+
+    return usePreparedPublication
+      ? await publishPreparedUpload(validatedInput)
+      : await processUploadImage(validatedInput);
+  } finally {
+    try {
+      await CancellationScope.nonCancellable(() => deleteUploadSource({
+        id: validatedInput.id,
+        sourceKey: validatedInput.sourceKey,
+      }));
+    } catch {
+      log.warn("Upload source cleanup failed", {
+        event: "upload_source_cleanup_failed",
+        uploadId: validatedInput.id,
+      });
+    }
+  }
+}

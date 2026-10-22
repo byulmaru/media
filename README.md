@@ -83,23 +83,17 @@ Kosmo의 staging metadata 확인을 출시할 때는 새 Media API를 모든 인
 
 Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포함하지 않습니다.
 
-### 브라우저 편집 및 Hope 연동 (계획)
+### 선택적 Hope 보호
 
-현재 구현된 기반에서는 v2 `PUT`이 원본 bytes만 private staging에 저장합니다. Workflow 시작 직후 원본을 검증하고 기본 WebP를 private staging에 준비하며, 원본은 Workflow가 terminal 상태가 될 때까지 유지됩니다. 브라우저 편집과 Hope 연결은 후속 구현이며, 작업은 [PROD-1192](https://linear.app/byulmaru/issue/PROD-1192/원본-기반-이미지-편집과-hope-처리-제한을-구현한다)에서 관리합니다.
+새 Nexus upload Workflow는 게시 전에 비동기 `setHope({ id, hope })`를 호출해 보호 처리를 요청할 수 있습니다. 기존 upload Workflow에는 적용되지 않으므로 Hope를 쓰려면 새 upload를 시작해야 합니다. `algorithm`은 `noise`, `glaze`, `nightshade` 중 하나이며 `iterations`가 필요합니다 (각각 최대 500, 600, 750). `intensity`는 선택 사항이며 기본값은 `0.3`입니다. `hope: null`은 Hope 선택을 지우고 원본에서 준비한 기본 WebP를 다시 선택합니다. 호출자는 `setHope` operation의 `result()`가 성공한 뒤 `publishUpload`를 호출해야 합니다. Hope 처리가 실패하면 마지막 성공 결과는 보존되지만, 대기 중인 게시가 자동 실행되지는 않습니다. 호출자는 보호 처리를 재시도하거나 `hope: null`로 초기화한 뒤 게시할 수 있습니다.
 
-편집 UI는 원본을 사용해 브라우저에서 crop/rotate 미리보기를 만들고, 사용자가 `Apply`를 선택할 때 편집 recipe를 보냅니다. 모든 변경 결과는 immutable original에서 다시 렌더링하며, 이전 lossy WebP를 다음 편집의 입력으로 쓰지 않습니다. 크기 제한은 서로 다른 단계에 독립적으로 적용합니다. Hope는 사용자가 명시적으로 적용을 요청할 때만 실행합니다.
+Hope 입력은 서버에서 긴 변 1024px로 줄인 뒤 전송합니다. 원본 업로드의 제한은 최대 16 MiB, 긴 변 8192px, 총 16 MiPixels로 유지됩니다. 원본과 준비된 WebP 및 Hope 결과는 private staging에 두며, 공개 게시 때 선택한 WebP bytes를 재인코딩 없이 복사합니다. 원본은 Workflow가 terminal 상태가 될 때까지 보존하고, 24시간 게시 기한 뒤 정리를 시도하며 48시간 lifecycle 규칙이 남은 staging 객체를 정리하는 backstop입니다.
 
-| 단계 | 제한 |
-| --- | --- |
-| 원본 업로드/검증 | 기존 최대 16 MiB, 긴 변 8192px, 총 16 MiPixels |
-| Crop 뒤 Hope 입력 | Hope HTTP 호출 전에 서버가 적용하는 별도 상한 (값 미정) |
-| 최종 결과 (Hope 사용 여부와 무관) | 별도 최종 출력 상한 (Hope 없이도 적용, 값 미정) |
+`setHope` 요청은 별도 request-handler Deployment 없이 기존 Media Worker의 `setHopeWorkflow` Workflow Run operation을 통해 upload Workflow에 전달되고 응답을 기다립니다. `setHope` operation을 취소하면 해당 요청과 결과 대기만 취소됩니다. 이미 Workflow가 수락한 Hope 처리는 계속될 수 있습니다. 처리를 취소하고 Workflow cleanup을 시작하려면 원래 `startUpload` session을 취소합니다. 이미 실행 중인 Hope HTTP 계산은 취소되지 않고 끝날 때까지 Hope 인스턴스의 단일 요청 슬롯을 점유할 수 있습니다.
 
-Crop이나 rotate가 바뀌면 이전 Hope 결과는 무효가 되며, 명시적인 `Apply`로 다시 준비해야 합니다. 새 준비가 실패하면 마지막 성공 결과는 보존하지만, 대기 중이거나 실패한 편집은 완료되었거나 게시 가능한 결과로 취급하지 않습니다. 게시 전에 현재 편집의 준비 성공을 기다리고, 준비된 bytes를 재인코딩 없이 복사합니다.
+Helm에서 `hope.enabled: true`와 cluster에서 접근 가능한 private Hope API의 origin인 `hope.baseUrl`을 설정하고, 기존 Vault KV 경로 `secret/kubernetes/media`에 `HOPE_API_TOKEN`을 추가합니다. 원격 endpoint는 HTTPS여야 하고 HTTP는 `localhost`, `127.0.0.1`, `[::1]`에서만 허용됩니다. Chart는 같은 image digest를 쓰는 별도 `media-hope` Activity Worker를 한 개의 replica와 한 번의 동시 실행으로 배포하며, 롤아웃은 `Recreate`로 처리합니다. `HOPE_API_TOKEN`은 Hope Worker에만 주입되며, Hope Worker replica 수는 기존 API replica 설정과 독립적으로 1개입니다.
 
-Hope Activity Worker는 같은 Temporal namespace `media`에서 실행하고, media Worker와 다른 전용 Task Queue를 사용합니다. 한 번에 하나씩 처리하려면 Worker별 `maxConcurrentActivityTaskExecutions`를 1로 설정하고, 롤아웃 중을 포함해 Hope Worker와 Hope HTTP instance를 각각 하나만 활성화합니다. Worker가 없을 때 대기 중인 Activity는 Temporal queue에 남습니다. Hope HTTP의 기존 semaphore 1은 timeout 뒤에도 계속되는 계산을 제한하는 인스턴스별 guard로 유지합니다.
-
-media Workflow는 Hope queue에 변환 Activity를 예약합니다. Activity는 private R2에서 immutable original을 읽어 recipe를 적용한 Hope 입력을 만들어 기존 Hope HTTP `POST /protect`를 호출합니다. 반환된 WebP를 private R2에 쓴 뒤 object key/reference만 Workflow에 돌려줍니다. Hope HTTP endpoint는 R2에 쓰지 않습니다. Workflow는 현재 편집의 결과 reference를 채택한 뒤 명시적 게시 요청을 기다리며, 최종 public R2 저장은 media가 소유합니다.
+브라우저 crop/rotate 편집과 Hope 사용 여부에 관계없이 적용할 일반 최종 출력 크기 상한은 [PROD-1192](https://linear.app/byulmaru/issue/PROD-1192/원본-기반-이미지-편집과-hope-처리-제한을-구현한다)의 후속 작업입니다.
 
 ## Infrastructure
 
@@ -112,7 +106,7 @@ media Workflow는 Hope queue에 변환 Activity를 예약합니다. Activity는 
 
 Staging bucket에는 public read, custom domain, `r2.dev` URL을 설정하지 않고, 브라우저 PUT CORS는 `https://kos.moe`, `https://dev.kos.moe`, `http://localhost:5173` origin에만 허용합니다.
 
-Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. `AWS_ACCESS_KEY_ID`와 `AWS_SECRET_ACCESS_KEY`는 `byulmaru-media`와 `byulmaru-media-staging` bucket의 object read/write만 허용하고, 서버의 secret store에 보관하며 이미지로 복사하지 않습니다. API와 Temporal Worker는 같은 credentials를 사용하므로 API pod에도 private staging bucket의 read/write 권한이 있습니다.
+Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. `AWS_ACCESS_KEY_ID`와 `AWS_SECRET_ACCESS_KEY`는 `byulmaru-media`와 `byulmaru-media-staging` bucket의 object read/write만 허용하고, 서버의 secret store에 보관하며 이미지로 복사하지 않습니다. API와 media Worker, 선택적으로 실행하는 Hope Worker는 같은 credentials를 사용하므로 API pod에도 private staging bucket의 read/write 권한이 있습니다. `HOPE_API_TOKEN`은 Hope Worker에만 주입합니다.
 
 Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 실행합니다. Pull request에서는 plan만 만들고, `main` push와 수동 실행에서는 새 saved plan을 생성해 그대로 적용합니다. State는 `byulmaru-terraform-state` S3 bucket의 `media/terraform.tfstate` key를 사용합니다.
 
@@ -186,13 +180,14 @@ docker run --rm -p 3000:3000 --env-file /path/to/runtime.env ghcr.io/byulmaru/me
 
 ## Temporal Worker
 
-Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 API와 같은 image digest를 사용합니다. 준비 Activity는 Sharp로 source를 검증하고 WebP를 private staging에 인코딩합니다. 게시 Activity는 준비된 객체를 알려진 길이로 공개 bucket에 stream하며 인코딩하지 않습니다. 필요한 환경 변수는 다음과 같습니다.
+Media Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 API와 같은 image digest를 사용합니다. 준비 Activity는 Sharp로 source를 검증하고 WebP를 private staging에 인코딩합니다. 게시 Activity는 준비된 객체를 알려진 길이로 공개 bucket에 stream하며 인코딩하지 않습니다. 필요한 환경 변수는 다음과 같습니다.
 
 - Temporal: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`
+- Hope feature gate: `HOPE_ENABLED` (`helm/values.yaml`의 `hope.enabled`)
 - Bucket 설정: `PUBLIC_BASE_URL`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_STAGING_BUCKET_NAME`
 - R2 credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
 
-`AWS_*` pair는 `byulmaru-media`와 `byulmaru-media-staging`의 object read/write에 사용합니다. Helm chart는 non-secret 설정을 values에서, 이 pair를 Vault secret에서 API와 Worker에 전달합니다.
+`AWS_*` pair는 `byulmaru-media`와 `byulmaru-media-staging`의 object read/write에 사용합니다. Helm chart는 non-secret 설정을 values에서, 이 pair를 Vault secret에서 API와 Media Worker에 전달합니다. Hope가 켜져 있으면 chart가 `node dist/hope-worker.js`를 실행하는 별도 Worker를 추가하며, 이 Worker에는 Hope endpoint와 `HOPE_API_TOKEN`도 전달합니다.
 
 ## API
 
@@ -328,9 +323,9 @@ pnpm infra:validate
 1. 위 Tailscale 변수와 외부 workload identity 정책을 준비한 뒤 Kubernetes repository의 Terraform 변경을 적용해 Media GitHub OIDC identity에 Argo CD `media` project 접근 권한을 줍니다. 이어서 이 repository의 Terraform을 적용해 `helm/` chart를 `media` namespace에 배포하는 `media` Application을 만듭니다. 처음에는 자동 동기화가 꺼져 있습니다.
 2. Worker 배포 전에 Kubernetes repository의 PR 145 NetworkPolicy 변경을 적용합니다. 이 network rule은 `media` namespace에서 Temporal frontend의 TCP 7233으로 연결할 수 있게 합니다. 이는 frontend network reachability만 허용하며 Temporal namespace authorization을 설정하지 않습니다. 다른 namespace나 port 허용은 추가하지 않습니다.
 3. Chart의 PreSync Job은 `media` Temporal namespace를 30일 retention으로 생성하거나 조정합니다. Temporal CLI는 cluster server와 같은 `1.31.2` admin-tools image를 사용하고 TLS와 config file/env 설정을 끕니다. NetworkPolicy를 먼저 적용해야 합니다.
-4. PR 13 storage 변경을 적용해 private `byulmaru-media-staging` bucket과 `uploads/` prefix의 48시간 lifecycle backstop, 미완료 multipart upload의 24시간 abort rule을 준비합니다. Terraform workflow와 Media Deploy workflow는 별개라 같은 push에서 실행 순서가 보장되지 않습니다. Vault Secrets Operator와 `vso-kubernetes-sync` Kubernetes auth role을 준비하고 KV v2 `secret/kubernetes/media`에 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`를 저장합니다. `API_KEY`는 호출자가 사용하는 값이어야 합니다. AWS pair에는 두 bucket의 object read/write 권한만 주고 Helm values나 image에는 credentials를 넣지 않습니다.
+4. PR 13 storage 변경을 적용해 private `byulmaru-media-staging` bucket과 `uploads/` prefix의 48시간 lifecycle backstop, 미완료 multipart upload의 24시간 abort rule을 준비합니다. Terraform workflow와 Media Deploy workflow는 별개라 같은 push에서 실행 순서가 보장되지 않습니다. Vault Secrets Operator와 `vso-kubernetes-sync` Kubernetes auth role을 준비하고 KV v2 `secret/kubernetes/media`에 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`를 저장합니다. Hope를 활성화할 때는 같은 경로에 `HOPE_API_TOKEN`도 저장합니다. `API_KEY`는 호출자가 사용하는 값이어야 합니다. AWS pair에는 두 bucket의 object read/write 권한만 주고 Helm values나 image에는 credentials를 넣지 않습니다.
 5. Chart의 기본 API host는 `media-api.byulmaru.co`이며 `host` 값이 HTTPRoute hostname과 `PUBLIC_API_BASE_URL`을 함께 정합니다. HTTPRoute는 `gateway/public` Gateway를 사용합니다. Cloudflare에 이 host의 proxied A record를 public Gateway EIP (`aws_eip.public_gateway_nlb.public_ip` in Kubernetes Terraform)로 한 번 추가해야 합니다. 이 repository는 DNS를 관리하지 않으며 공개 이미지 URL `media.byulma.run`은 그대로 사용합니다.
-6. 첫 성공한 ARM64 게시 후 Deploy workflow가 source SHA, `version`, `imageDigest`를 함께 설정하고 자동 동기화, prune, self-heal을 켭니다. 이 첫 sync에서 위 PreSync Job이 `media` Temporal namespace를 준비합니다. Chart의 기본 image reference는 기존 AMD64 seed이므로 첫 ARM64 게시 전에는 수동 sync하지 않습니다. Deploy workflow는 Application의 목표 SHA/version/digest와 관찰된 sync SHA가 맞고 sync가 `Synced`, health가 `Healthy`일 때 성공합니다. API와 Worker는 같은 ARM64 image digest를 사용하며 Worker는 HTTP port나 Service를 노출하지 않습니다.
+6. 첫 성공한 ARM64 게시 후 Deploy workflow가 source SHA, `version`, `imageDigest`를 함께 설정하고 자동 동기화, prune, self-heal을 켭니다. 이 첫 sync에서 위 PreSync Job이 `media` Temporal namespace를 준비합니다. Chart의 기본 image reference는 기존 AMD64 seed이므로 첫 ARM64 게시 전에는 수동 sync하지 않습니다. Deploy workflow는 Application의 목표 SHA/version/digest와 관찰된 sync SHA가 맞고 sync가 `Synced`, health가 `Healthy`일 때 성공합니다. API와 Worker는 같은 ARM64 image digest를 사용하며 Worker는 HTTP port나 Service를 노출하지 않습니다. Hope를 활성화하면 별도 Worker도 같은 digest로 배포되고, `hope.baseUrl`에는 HTTPS origin을 설정합니다.
 7. Nexus endpoint 이름 `media-upload`는 cluster-global registry에 운영자가 한 번 등록합니다. Chart는 endpoint를 자동 생성하거나 수정하지 않습니다. 첫 sync가 완료되고 `media` Temporal namespace가 준비된 뒤 endpoint를 설정합니다. Endpoint는 namespace `media`, task queue `media-upload`를 가리켜야 합니다. Temporal frontend에 연결 가능한 권한 있는 host에서 먼저 확인합니다.
 
    ```sh
@@ -360,4 +355,4 @@ pnpm infra:validate
    ```
 
    기존 endpoint가 이 target과 같으면 그대로 둡니다. 다른 곳을 가리키면 소유자와 조율하고 이 배포에서 retarget하지 않습니다.
-8. endpoint 등록 뒤 caller Workflow에서 `mediaService.startUpload`와 `publishUpload`를 사용할 수 있습니다. API는 기존 `/v1` inline 경로를 유지하고 Worker는 `media-upload` task queue에서 Nexus operation을 처리합니다. 두 Deployment는 영속 볼륨 없이 기존 R2 bucket을 사용합니다. Staging workflow는 원본 `LastModified`부터 24시간 안에 게시를 기다리고, 남은 `uploads/` 원본은 48시간 lifecycle rule이 backstop으로 정리합니다. API와 Worker는 CPU 100m / memory 256Mi를 요청하고 CPU 1 / memory 1Gi로 제한합니다. 서버는 SIGTERM 때 요청을 drain하지 않아 pod 교체가 진행 중인 upload를 끊을 수 있습니다.
+8. endpoint 등록 뒤 caller Workflow에서 `mediaService.startUpload`, 선택적 `setHope`, `publishUpload`를 사용할 수 있습니다. API는 기존 `/v1` inline 경로를 유지하고 Media Worker는 `media-upload` task queue에서 Nexus operation을 처리합니다. Hope가 켜져 있으면 별도 Worker가 고정 `media-hope` task queue를 처리합니다. Deployment들은 영속 볼륨 없이 기존 R2 bucket을 사용합니다. Staging workflow는 원본 `LastModified`부터 24시간 안에 게시를 기다리고, 남은 `uploads/` 원본은 48시간 lifecycle rule이 backstop으로 정리합니다. API와 Media Worker는 CPU 100m / memory 256Mi를 요청하고 CPU 1 / memory 1Gi로 제한합니다. 서버는 SIGTERM 때 요청을 drain하지 않아 pod 교체가 진행 중인 upload를 끊을 수 있습니다.

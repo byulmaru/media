@@ -1,0 +1,79 @@
+{{- if .Values.hope.enabled }}
+{{- $baseUrl := required "hope.baseUrl is required when hope.enabled is true" .Values.hope.baseUrl }}
+{{- if not (regexMatch "^https://([^:/?#@]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?$" $baseUrl) }}
+{{- if not (regexMatch "^http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?$" $baseUrl) }}
+{{- fail "hope.baseUrl must be an origin-only HTTPS URL, or an HTTP loopback URL for local testing" }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-hope-worker
+  labels:
+    app.kubernetes.io/name: media
+    app.kubernetes.io/instance: {{ .Release.Name }}-hope-worker
+    app.kubernetes.io/component: hope-worker
+    app.kubernetes.io/version: {{ .Values.version | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: media
+      app.kubernetes.io/instance: {{ .Release.Name }}-hope-worker
+      app.kubernetes.io/component: hope-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: media
+        app.kubernetes.io/instance: {{ .Release.Name }}-hope-worker
+        app.kubernetes.io/component: hope-worker
+        app.kubernetes.io/version: {{ .Values.version | quote }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: hope-worker
+          image: {{ printf "ghcr.io/byulmaru/media:%s@%s" .Values.version .Values.imageDigest | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "dist/hope-worker.js"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: {{ .Values.temporal.address | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.temporal.namespace | quote }}
+            - name: R2_ENDPOINT
+              value: {{ .Values.config.r2Endpoint | quote }}
+            - name: R2_BUCKET_NAME
+              value: {{ .Values.config.r2BucketName | quote }}
+            - name: R2_STAGING_BUCKET_NAME
+              value: {{ .Values.config.r2StagingBucketName | quote }}
+            - name: HOPE_BASE_URL
+              value: {{ $baseUrl | quote }}
+            - name: HOPE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: HOPE_API_TOKEN
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: AWS_SECRET_ACCESS_KEY
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}
