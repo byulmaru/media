@@ -15,7 +15,6 @@ import {
   workflowInfo,
 } from "@temporalio/workflow";
 import type * as activities from "./activities";
-import type * as hopeActivities from "./hope-activities";
 import type {
   ProcessUploadInput,
   ProcessUploadResult,
@@ -24,8 +23,10 @@ import type {
   ApplyHopeResult,
   ApplyHopeWorkflowFailure,
   ApplyHopeWorkflowReply,
+  HopeProcessingActivities,
 } from "./types";
 import {
+  HOPE_MAX_EDGE,
   HOPE_PROCESSING_ERROR_TYPE,
   HOPE_TASK_QUEUE,
   PUBLISH_UPLOAD_SIGNAL_NAME,
@@ -161,13 +162,7 @@ function safeApplyHopeFailure(error: unknown): ApplyHopeWorkflowFailure {
   if (type === UPLOAD_VALIDATION_ERROR_TYPE) {
     return { type, message: "Hope source image is invalid" };
   }
-  if (type === "HopeOutputError") {
-    return { type, message: "Hope service returned an invalid image" };
-  }
-  if (type === "HopeNetworkError") {
-    return { type, message: "Hope service request failed" };
-  }
-  return { type, message: "Hope service request failed" };
+  return { type, message: "Hope processing failed" };
 }
 
 type HopeCommand = ApplyHopeRequestSignal;
@@ -346,10 +341,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
               if (remaining <= 0) throw uploadExpiredError();
               const cleanupGraceMs = 5 * 60 * 1000;
               const startToCloseMs = Math.min(30 * 60 * 1000, remaining + cleanupGraceMs);
-              const { prepareHopeUpload } = proxyActivities<Pick<
-                ReturnType<typeof hopeActivities.createHopeProcessingActivities>,
-                "prepareHopeUpload"
-              >>({
+              const { prepareHopeUpload } = proxyActivities<HopeProcessingActivities>({
                 taskQueue: HOPE_TASK_QUEUE,
                 startToCloseTimeout: startToCloseMs,
                 scheduleToCloseTimeout: remaining + cleanupGraceMs,
@@ -368,6 +360,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
                 prepareHopeUpload({
                   ...validatedInput,
                   requestId: command.requestId,
+                  maxEdge: HOPE_MAX_EDGE,
                   hope: command.hope!,
                 }),
               );

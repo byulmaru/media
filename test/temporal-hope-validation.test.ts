@@ -6,7 +6,6 @@ import {
   parseApplyHopeRequestSignal,
   parseApplyHopeWorkflowReply,
 } from "../src/temporal/validation";
-import { hopeWorkerConfigSchema } from "../src/temporal/hope-config";
 
 const uploadId = "u_00000000-0000-4000-8000-000000000000";
 const otherUploadId = "u_00000000-0000-4000-8000-000000000001";
@@ -63,7 +62,7 @@ describe("internal applyHope request and reply validation", () => {
     }, true],
     ["typed failure", {
       requestId,
-      error: { type: "HopeHttpError", message: "Hope service request failed" },
+      error: { type: "HopeProcessingError", message: "Hope processing failed" },
     }, true],
     ["mismatched request ID", {
       requestId: "00000000-0000-4000-8000-000000000002",
@@ -75,36 +74,5 @@ describe("internal applyHope request and reply validation", () => {
     }, false],
   ] as const)("validates %s", (_name, reply, valid) => {
     expect(parseApplyHopeWorkflowReply(uploadId, requestId, reply) !== undefined).toBe(valid);
-  });
-});
-
-describe("Hope worker configuration", () => {
-  const config = {
-    TEMPORAL_ADDRESS: "temporal-frontend.temporal.svc.cluster.local:7233",
-    TEMPORAL_NAMESPACE: "media",
-    R2_ENDPOINT: "https://account.r2.cloudflarestorage.com",
-    R2_BUCKET_NAME: "byulmaru-media",
-    R2_STAGING_BUCKET_NAME: "byulmaru-media-staging",
-    AWS_ACCESS_KEY_ID: "media-access-key",
-    AWS_SECRET_ACCESS_KEY: "media-secret-key",
-    HOPE_BASE_URL: "https://hope.example.com",
-    HOPE_API_TOKEN: "test-token",
-  };
-
-  it("accepts a private HTTPS endpoint and local loopback HTTP for tests", () => {
-    expect(hopeWorkerConfigSchema.safeParse(config).success).toBe(true);
-    expect(hopeWorkerConfigSchema.safeParse({
-      ...config,
-      HOPE_BASE_URL: "http://127.0.0.1:8000",
-    }).success).toBe(true);
-  });
-
-  it.each([
-    ["remote HTTP", { HOPE_BASE_URL: "http://hope.example.com" }],
-    ["URL path", { HOPE_BASE_URL: "https://hope.example.com/protect" }],
-    ["blank API token", { HOPE_API_TOKEN: " " }],
-    ["shared staging and public bucket", { R2_STAGING_BUCKET_NAME: "byulmaru-media" }],
-  ] as const)("rejects %s", (_name, patch) => {
-    expect(hopeWorkerConfigSchema.safeParse({ ...config, ...patch }).success).toBe(false);
   });
 });

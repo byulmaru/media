@@ -5,7 +5,6 @@ import type {
   ProcessUploadInput,
   PublishPreparedUploadInput,
   PublishUploadInput,
-  HopeProcessingInput,
   NormalizedHopeOptions,
   ApplyHopeResult,
   ApplyHopeRequestEnvelope,
@@ -99,12 +98,6 @@ const applyHopeWorkflowReplySchema = z.union([
     }),
   }),
 ]);
-
-export const hopeProcessingInputSchema = z.strictObject({
-  ...processUploadFields,
-  requestId: uuidSchema,
-  hope: hopeOptionsSchema,
-}).refine((input) => input.sourceKey.split("/")[1] === input.id);
 
 export function parseProcessUploadInput(input: unknown): ProcessUploadInput | undefined {
   const parsed = processUploadInputSchema.safeParse(input);
@@ -200,9 +193,4 @@ export function parseApplyHopeWorkflowReply(
   return normalizedResult?.id === uploadId
     ? { requestId, result: normalizedResult }
     : undefined;
-}
-
-export function parseHopeProcessingInput(input: unknown): HopeProcessingInput | undefined {
-  const parsed = hopeProcessingInputSchema.safeParse(input);
-  return parsed.success ? parsed.data : undefined;
 }

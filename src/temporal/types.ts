@@ -16,9 +16,6 @@ export const APPLY_HOPE_REPLY_ERROR_TYPES = [
   UPLOAD_PROCESSING_INPUT_ERROR_TYPE,
   UPLOAD_SOURCE_ERROR_TYPE,
   UPLOAD_VALIDATION_ERROR_TYPE,
-  "HopeHttpError",
-  "HopeNetworkError",
-  "HopeOutputError",
 ] as const;
 export const UPLOAD_EXPIRATION_MS = 24 * 60 * 60 * 1000;
 export const HOPE_TASK_QUEUE = "media-hope";
@@ -87,7 +84,12 @@ export interface ApplyHopeResult {
 
 export interface HopeProcessingInput extends ProcessUploadInput {
   requestId: string;
+  maxEdge: typeof HOPE_MAX_EDGE;
   hope: NormalizedHopeOptions;
+}
+
+export interface HopeProcessingActivities {
+  prepareHopeUpload(input: HopeProcessingInput): Promise<void>;
 }
 
 export interface ApplyHopeRequestSignal {
