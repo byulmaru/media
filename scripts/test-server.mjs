@@ -11,7 +11,6 @@ const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
-
 const appEnv = {
   API_KEY: "test-api-key",
   UPLOAD_SIGNING_SECRET: "test-signing-secret-at-least-32-bytes",
@@ -358,6 +357,7 @@ test("built Node server stages raw uploads privately", async () => {
     const ticket = JSON.parse(created.body.toString("utf8"));
     assert.deepEqual(Object.keys(ticket).sort(), ["expiresAt", "id", "uploadUrl"]);
 
+    const rawBytes = Buffer.from("not an image");
     const uploadPath = new URL(ticket.uploadUrl).pathname;
     const uploaded = await sendHttp(address.port, uploadPath, {
       method: "PUT",
@@ -366,15 +366,16 @@ test("built Node server stages raw uploads privately", async () => {
         Origin: "https://app.example.com",
         "Content-Type": "image/png",
       },
-      body: PNG_1X1,
+      body: rawBytes,
     });
     assert.equal(uploaded.statusCode, 201);
     assert.deepEqual(JSON.parse(uploaded.body.toString("utf8")), { id: ticket.id });
 
     const sourceKey = `uploads/${ticket.id}/${ticket.id.slice(2)}`;
     const staged = staging.objects.get(sourceKey);
-    assert.deepEqual(staged.bytes, PNG_1X1);
+    assert.deepEqual(staged.bytes, rawBytes);
     assert.deepEqual(staged.httpMetadata, { contentType: "image/png" });
+    assert(staged.uploaded instanceof Date);
     assert.equal(media.objects.has(`original/${ticket.id}.webp`), false);
 
     const status = await sendHttp(
@@ -387,7 +388,7 @@ test("built Node server stages raw uploads privately", async () => {
     );
     assert.equal(status.statusCode, 200);
     assert.equal(status.headers["cache-control"], "no-store");
-    assert.equal(status.headers["content-length"], String(PNG_1X1.byteLength));
+    assert.equal(status.headers["content-length"], String(rawBytes.byteLength));
     assert.equal(status.headers["content-type"], "image/png");
     assert.equal(status.headers["last-modified"], staged.uploaded.toUTCString());
     assert.equal(status.body.length, 0);
@@ -402,7 +403,7 @@ test("built Node server stages raw uploads privately", async () => {
     const duplicate = await sendHttp(address.port, uploadPath, {
       method: "PUT",
       headers: { Host: "internal.example", Origin: "https://app.example.com", "Content-Type": "image/png" },
-      body: PNG_1X1,
+      body: rawBytes,
     });
     assert.equal(duplicate.statusCode, 409);
 

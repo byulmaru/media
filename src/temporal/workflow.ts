@@ -4,6 +4,7 @@ import {
   condition,
   defineSignal,
   log,
+  patched,
   proxyActivities,
   setHandler,
 } from "@temporalio/workflow";
@@ -34,9 +35,9 @@ const { getUploadSourceLastModified } = proxyActivities<Pick<
   },
 });
 
-const { processUploadImage } = proxyActivities<Pick<
+const { processUploadImage, prepareUploadImage } = proxyActivities<Pick<
   ReturnType<typeof activities.createUploadProcessingActivities>,
-  "processUploadImage"
+  "processUploadImage" | "prepareUploadImage"
 >>({
   startToCloseTimeout: "2 minutes",
   scheduleToCloseTimeout: "5 minutes",
@@ -44,6 +45,19 @@ const { processUploadImage } = proxyActivities<Pick<
     initialInterval: "1 second",
     maximumInterval: "30 seconds",
     nonRetryableErrorTypes: [UPLOAD_VALIDATION_ERROR_TYPE, UPLOAD_PROCESSING_INPUT_ERROR_TYPE],
+  },
+});
+
+const { publishPreparedUpload } = proxyActivities<Pick<
+  ReturnType<typeof activities.createUploadProcessingActivities>,
+  "publishPreparedUpload"
+>>({
+  startToCloseTimeout: "2 minutes",
+  scheduleToCloseTimeout: "5 minutes",
+  retry: {
+    initialInterval: "1 second",
+    maximumInterval: "30 seconds",
+    nonRetryableErrorTypes: [UPLOAD_PROCESSING_INPUT_ERROR_TYPE],
   },
 });
 
@@ -100,6 +114,13 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
     const deadline = uploadedAt + UPLOAD_EXPIRATION_MS;
     if (!Number.isFinite(deadline)) throw uploadSourceError();
     if (Date.now() >= deadline) throw uploadExpiredError();
+
+    const usePreparedPublication = patched("prepare-private-webp-before-publish");
+    if (usePreparedPublication) {
+      await prepareUploadImage(validatedInput);
+      if (Date.now() >= deadline) throw uploadExpiredError();
+    }
+
     if (!published) {
       if (!(await condition(() => published, Math.max(0, deadline - Date.now())))) {
         throw uploadExpiredError();
@@ -107,7 +128,9 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
       if (Date.now() >= deadline) throw uploadExpiredError();
     }
 
-    return await processUploadImage(validatedInput);
+    return usePreparedPublication
+      ? await publishPreparedUpload(validatedInput)
+      : await processUploadImage(validatedInput);
   } finally {
     try {
       await CancellationScope.nonCancellable(() => deleteUploadSource({

@@ -83,18 +83,67 @@ test("staging adapter maps missing metadata and bounds streamed reads", async ()
   }, "media-staging");
   await assert.rejects(oversizedByStream.get("uploads/large", 4), /exceeds maxBytes/);
   assert.equal(destroyed, true);
+
+  const preparedBytes = Buffer.from("webp");
+  const preparedBody = Readable.from([preparedBytes]);
+  const preparedStorage = new R2S3StagingStorage({
+    async send(command) {
+      assert(command instanceof GetObjectCommand);
+      assert.deepEqual(command.input, { Bucket: "media-staging", Key: "uploads/a.webp" });
+      return { ContentType: "image/webp", ContentLength: preparedBytes.byteLength, Body: preparedBody };
+    },
+  }, "media-staging");
+  const preparedStream = await preparedStorage.getStream("uploads/a.webp", "image/webp");
+  assert.equal(preparedStream.body, preparedBody);
+  assert.equal(preparedStream.contentLength, preparedBytes.byteLength);
+  assert.deepEqual(Buffer.concat(await Array.fromAsync(preparedStream.body)), preparedBytes);
+
+  for (const [label, metadata] of [
+    ["content type", { ContentType: "image/png", ContentLength: 4 }],
+    ["content length", { ContentType: "image/webp" }],
+  ]) {
+    const invalidBody = Readable.from([preparedBytes]);
+    const invalidStorage = new R2S3StagingStorage({
+      async send(command) {
+        assert(command instanceof GetObjectCommand);
+        return { ...metadata, Body: invalidBody };
+      },
+    }, "media-staging");
+    await assert.rejects(
+      invalidStorage.getStream("uploads/a.webp", "image/webp"),
+      /staged object stream metadata is invalid/,
+      `${label} mismatch should reject the staged stream`,
+    );
+    assert.equal(invalidBody.destroyed, true);
+  }
 });
 
 class MemoryStagingStorage {
   objects = new Map();
   lastModifiedReads = new Map();
   contentReads = new Map();
+  streamReads = new Map();
+  putStreamKeys = [];
   deleteKeys = [];
   failDeleteKey;
+  transientDeleteKey;
   getGate;
 
-  seed(key, bytes, lastModified = new Date()) {
-    this.objects.set(key, { bytes: Uint8Array.from(bytes), lastModified });
+  seed(key, bytes, lastModified = new Date(), contentType = "image/png") {
+    this.objects.set(key, {
+      bytes: Uint8Array.from(bytes),
+      lastModified,
+      httpMetadata: { contentType },
+    });
+  }
+
+  async head(key) {
+    const object = this.objects.get(key);
+    return object ? {
+      httpMetadata: object.httpMetadata,
+      size: object.bytes.byteLength,
+      uploaded: object.lastModified,
+    } : null;
   }
 
   async headLastModified(key) {
@@ -115,6 +164,42 @@ class MemoryStagingStorage {
     return object.bytes.slice().buffer;
   }
 
+  async putStream(key, body, contentLength, options) {
+    assert.equal(options.onlyIf.get("If-None-Match"), "*");
+    this.putStreamKeys.push(key);
+    if (this.objects.has(key)) return null;
+    const chunks = [];
+    for await (const chunk of body) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks);
+    assert.equal(bytes.byteLength, contentLength);
+    this.objects.set(key, {
+      bytes,
+      lastModified: new Date(),
+      httpMetadata: options.httpMetadata,
+    });
+    return {};
+  }
+
+  async getStream(key, contentType) {
+    this.streamReads.set(key, (this.streamReads.get(key) ?? 0) + 1);
+    const object = this.objects.get(key);
+    if (!object) return null;
+    if (object.httpMetadata?.contentType !== contentType) {
+      throw new Error("prepared image has an invalid content type");
+    }
+    if (!Number.isSafeInteger(object.bytes.byteLength) || object.bytes.byteLength <= 0) {
+      throw new Error("prepared image has an invalid size");
+    }
+    if (this.getGate?.key === key) {
+      this.getGate.started();
+      await this.getGate.promise;
+    }
+    return {
+      body: Readable.from([object.bytes]),
+      contentLength: object.bytes.byteLength,
+    };
+  }
+
   async delete(key) {
     this.deleteKeys.push(key);
     if (this.failDeleteKey === key) {
@@ -124,6 +209,10 @@ class MemoryStagingStorage {
         type: "InjectedCleanupFailure",
         nonRetryable: true,
       });
+    }
+    if (this.transientDeleteKey === key) {
+      this.transientDeleteKey = undefined;
+      throw new Error("injected transient staged-source cleanup failure");
     }
     this.objects.delete(key);
   }
@@ -138,10 +227,12 @@ class MemoryMediaStorage {
   failStreamKey;
   failStreamError;
   conflictKey;
+  conflictHeadMisses = 0;
 
   async head(key) {
-    if (key === this.conflictKey) {
-      this.conflictKey = undefined;
+    if (key === this.conflictKey && this.conflictHeadMisses > 0) {
+      this.conflictHeadMisses -= 1;
+      if (this.conflictHeadMisses === 0) this.conflictKey = undefined;
       return null;
     }
     const object = this.objects.get(key);
@@ -265,6 +356,10 @@ function newUpload() {
   return { id, sourceKey: `uploads/${id}/${randomUUID()}` };
 }
 
+function preparedKey(sourceKey) {
+  return `${sourceKey}.webp`;
+}
+
 function withTimeout(promise, timeoutMs, message) {
   let timer;
   return Promise.race([
@@ -300,13 +395,13 @@ async function waitFor(predicate, message, timeoutMs = WORKFLOW_TIMEOUT_MS) {
   throw new Error(message);
 }
 
-async function startWorker(environment, workflowBundle, staging, media, failures) {
+async function startWorker(environment, workflowBundle, staging, media, failures, activities) {
   const worker = await Worker.create({
     connection: environment.nativeConnection,
     namespace: environment.namespace,
     taskQueue: TASK_QUEUE,
     workflowBundle: { code: workflowBundle.code },
-    activities: createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL),
+    activities: activities ?? createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL),
     nexusServices: [mediaServiceHandler],
     maxConcurrentActivityTaskExecutions: 4,
   });
@@ -333,6 +428,7 @@ async function awaitUploadWorkflowWaiting(environment, staging, id, sourceKey) {
     "workflow did not inspect source metadata",
   );
   await waitFor(async () => {
+    if (!staging.objects.has(preparedKey(sourceKey))) return false;
     const history = await environment.client.workflow.getHandle(`media-upload:${id}`).fetchHistory();
     return history.events.some((event) => event.timerStartedEventAttributes);
   }, "upload workflow did not reach its durable publish wait");
@@ -355,11 +451,23 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   staging.seed(oriented.sourceKey, JPEG_ORIENTED_2X1);
   staging.seed(transparent.sourceKey, PNG_RGBA_2X1);
 
-  await activities.processUploadImage(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
-  await activities.processUploadImage(uploadInput(transparent.id, transparent.sourceKey));
+  await activities.prepareUploadImage(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
+  await activities.prepareUploadImage(uploadInput(transparent.id, transparent.sourceKey));
+
+  const orientedPrepared = staging.objects.get(preparedKey(oriented.sourceKey));
+  const transparentPrepared = staging.objects.get(preparedKey(transparent.sourceKey));
+  assert(orientedPrepared);
+  assert(transparentPrepared);
+  assert.equal(orientedPrepared.httpMetadata.contentType, "image/webp");
+  assert.equal(transparentPrepared.httpMetadata.contentType, "image/webp");
+  assert.equal(media.objects.size, 0);
+
+  await activities.publishPreparedUpload(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
+  await activities.publishPreparedUpload(uploadInput(transparent.id, transparent.sourceKey));
 
   const orientedImage = media.objects.get(`original/${oriented.id}.webp`);
   assert(orientedImage);
+  assert.deepEqual(orientedImage.bytes, orientedPrepared.bytes);
   assert.equal(media.streamReads.get(`original/${oriented.id}.webp`), 1);
   assert.equal(media.streams.get(`original/${oriented.id}.webp`).destroyed, true);
   const orientedMetadata = await sharp(orientedImage.bytes).metadata();
@@ -371,6 +479,7 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
 
   const transparentImage = media.objects.get(`original/${transparent.id}.webp`);
   assert(transparentImage);
+  assert.deepEqual(transparentImage.bytes, transparentPrepared.bytes);
   assert.equal(media.streamReads.get(`original/${transparent.id}.webp`), 1);
   assert.equal(media.streams.get(`original/${transparent.id}.webp`).destroyed, true);
   const decoded = await sharp(transparentImage.bytes)
@@ -382,6 +491,77 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert.equal(decoded.data[7], 0);
 });
 
+test("legacy image activity returns an existing public object without staged reads or writes", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const existing = newUpload();
+  const outputKey = `original/${existing.id}.webp`;
+  const existingBytes = Buffer.from("already-published-webp");
+  media.objects.set(outputKey, {
+    bytes: existingBytes,
+    httpMetadata: { contentType: "image/webp" },
+  });
+
+  assert.deepEqual(
+    await activities.processUploadImage(uploadInput(existing.id, existing.sourceKey)),
+    {
+      id: existing.id,
+      url: `${PUBLIC_BASE_URL}/${outputKey}`,
+      mediaType: "image/webp",
+    },
+  );
+  assert.deepEqual(media.objects.get(outputKey).bytes, existingBytes);
+  assert.equal(staging.contentReads.get(existing.sourceKey) ?? 0, 0);
+  assert.equal(staging.objects.has(preparedKey(existing.sourceKey)), false);
+  assert.deepEqual(staging.putStreamKeys, []);
+  assert.equal(media.putCounts.get(outputKey) ?? 0, 0);
+  assert.equal(media.streamReads.get(outputKey) ?? 0, 0);
+});
+
+test("prepared publication retries a public write without rereading or reencoding staged bytes", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const source = newUpload();
+  const input = uploadInput(source.id, source.sourceKey);
+  const preparedObjectKey = preparedKey(source.sourceKey);
+  const outputKey = `original/${source.id}.webp`;
+  staging.seed(source.sourceKey, PNG_1X1);
+
+  await activities.prepareUploadImage(input);
+  const preparedBytes = Buffer.from(staging.objects.get(preparedObjectKey).bytes);
+  assert.equal(staging.contentReads.get(source.sourceKey), 1);
+  assert.deepEqual(staging.putStreamKeys, [preparedObjectKey]);
+  staging.objects.delete(source.sourceKey);
+
+  const storageError = new Error("injected public storage transport failure");
+  media.failStreamKey = outputKey;
+  media.failStreamError = storageError;
+  await assert.rejects(
+    activities.publishPreparedUpload(input),
+    (error) => error === storageError,
+  );
+  const failedStream = media.streams.get(outputKey);
+  assert(failedStream.destroyed);
+  assert.equal(media.objects.has(outputKey), false);
+  assert.equal(staging.objects.has(source.sourceKey), false);
+  assert.equal(staging.contentReads.get(source.sourceKey), 1);
+  assert.deepEqual(staging.putStreamKeys, [preparedObjectKey]);
+
+  assert.deepEqual(await activities.publishPreparedUpload(input), {
+    id: source.id,
+    url: `${PUBLIC_BASE_URL}/${outputKey}`,
+    mediaType: "image/webp",
+  });
+  assert.deepEqual(media.objects.get(outputKey).bytes, preparedBytes);
+  assert.equal(media.putCounts.get(outputKey), 2);
+  assert.equal(media.streamReads.get(outputKey), 1);
+  assert.equal(media.streams.get(outputKey).destroyed, true);
+  assert.equal(staging.contentReads.get(source.sourceKey), 1);
+  assert.deepEqual(staging.putStreamKeys, [preparedObjectKey]);
+});
+
 test("Temporal activity classifies native malformed decodes as non-retryable invalid_image without a public write", async () => {
   const staging = new MemoryStagingStorage();
   const media = new MemoryMediaStorage();
@@ -390,7 +570,7 @@ test("Temporal activity classifies native malformed decodes as non-retryable inv
   staging.seed(malformed.sourceKey, PNG_RGBA_2X1.slice(0, 30));
 
   await assert.rejects(
-    activities.processUploadImage(uploadInput(malformed.id, malformed.sourceKey)),
+    activities.prepareUploadImage(uploadInput(malformed.id, malformed.sourceKey)),
     (error) => {
       assert(error instanceof ApplicationFailure);
       assert.equal(error.type, "UploadValidationError");
@@ -401,6 +581,7 @@ test("Temporal activity classifies native malformed decodes as non-retryable inv
   );
   assert.equal(media.putCounts.get(`original/${malformed.id}.webp`) ?? 0, 0);
   assert.equal(media.objects.has(`original/${malformed.id}.webp`), false);
+  assert.equal(staging.objects.has(preparedKey(malformed.sourceKey)), false);
   assert.equal(staging.contentReads.get(malformed.sourceKey), 1);
   assert.equal(media.streams.size, 0);
 });
@@ -417,6 +598,7 @@ test("Temporal activity destroys an unconsumed WebP stream after a conditional c
     httpMetadata: { contentType: "image/webp" },
   });
   media.conflictKey = conflictKey;
+  media.conflictHeadMisses = 2;
   await activities.processUploadImage(uploadInput(conflict.id, conflict.sourceKey));
   assert.equal(media.putCounts.get(conflictKey), 1);
   assert.equal(media.streamReads.get(conflictKey) ?? 0, 0);
@@ -451,6 +633,91 @@ test("Temporal activity destroys an unconsumed WebP stream after a conditional c
   );
   assert.equal(media.putCounts.get(transportFailedKey), 1);
   assert.equal(media.streams.get(transportFailedKey).destroyed, true);
+});
+
+test("markerless legacy history replays without preparing until publish is signaled", async () => {
+  const legacyWorkflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/fixtures/legacy-upload-workflow.ts"),
+  });
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const source = newUpload();
+  const input = uploadInput(source.id, source.sourceKey);
+  staging.seed(source.sourceKey, PNG_1X1);
+  let worker;
+
+  try {
+    worker = await startWorker(environment, legacyWorkflowBundle, staging, media, workerFailures);
+    const handle = await environment.client.workflow.start("processUploadWorkflow", {
+      workflowId: `legacy-replay:${source.id}`,
+      taskQueue: TASK_QUEUE,
+      args: [input],
+    });
+
+    await waitFor(async () => {
+      const history = await handle.fetchHistory();
+      return history.events.some((event) => event.timerStartedEventAttributes);
+    }, "legacy workflow did not reach its durable publish wait");
+    const legacyHistory = await handle.fetchHistory();
+    assert.equal(legacyHistory.events.some((event) => event.markerRecordedEventAttributes), false);
+    assert.equal(staging.contentReads.get(source.sourceKey) ?? 0, 0);
+    assert.equal(staging.objects.has(preparedKey(source.sourceKey)), false);
+    assert.equal(media.objects.has(`original/${source.id}.webp`), false);
+
+    await stopWorker(worker);
+    const calls = { prepare: 0, publish: 0, process: 0 };
+    const baseActivities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+    let preparedBytes;
+    const trackedActivities = {
+      ...baseActivities,
+      async prepareUploadImage(activityInput) {
+        calls.prepare += 1;
+        return baseActivities.prepareUploadImage(activityInput);
+      },
+      async publishPreparedUpload(activityInput) {
+        calls.publish += 1;
+        return baseActivities.publishPreparedUpload(activityInput);
+      },
+      async processUploadImage(activityInput) {
+        calls.process += 1;
+        const result = await baseActivities.processUploadImage(activityInput);
+        preparedBytes = Buffer.from(staging.objects.get(preparedKey(source.sourceKey)).bytes);
+        return result;
+      },
+    };
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      trackedActivities,
+    );
+
+    await handle.signal("publishUpload");
+    const result = await withTimeout(handle.result(), WORKFLOW_TIMEOUT_MS, "legacy history did not replay and publish");
+    const outputKey = `original/${source.id}.webp`;
+    assert.equal(result.id, source.id);
+    assert.equal(calls.process, 1);
+    assert.equal(calls.prepare, 0);
+    assert.equal(calls.publish, 0);
+    assert.deepEqual(media.objects.get(outputKey).bytes, preparedBytes);
+    assert.equal(staging.objects.has(source.sourceKey), false);
+    assert.equal(staging.objects.has(preparedKey(source.sourceKey)), false);
+    assert.deepEqual(staging.deleteKeys, [preparedKey(source.sourceKey), source.sourceKey]);
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.teardown();
+  }
 });
 
 test("Nexus upload operations wait, publish idempotently, and clean up terminal workflows", async () => {
@@ -548,21 +815,22 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     };
     let blockedResultPromise;
     let blockedCompleted = false;
+    let blockedCaller;
     try {
-      const blockedCaller = await startCaller(
+      blockedCaller = await startCaller(
         environment,
         endpointName,
         uploadInput(blocked.id, blocked.sourceKey),
         `blocked-caller:${randomUUID()}`,
       );
-      await awaitUploadWorkflowWaiting(environment, staging, blocked.id, blocked.sourceKey);
-      await blockedCaller.signal("finishNexusUploadTest");
+      await withTimeout(blockedGetStarted, WORKFLOW_TIMEOUT_MS, "first upload did not start preparation");
+      const blockedHistory = await environment.client.workflow.getHandle(`media-upload:${blocked.id}`).fetchHistory();
+      assert.equal(blockedHistory.events.some((event) => event.timerStartedEventAttributes), false);
       blockedResultPromise = blockedCaller.result().then((result) => {
         blockedCompleted = true;
         assert.equal(result.upload?.id, blocked.id);
         assert.equal(result.error, undefined);
       });
-      await withTimeout(blockedGetStarted, WORKFLOW_TIMEOUT_MS, "first upload did not start processing");
 
       const concurrentCaller = await startCaller(
         environment,
@@ -583,14 +851,22 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       assert.equal(blockedCompleted, false);
       assert.equal(staging.objects.has(blocked.sourceKey), true);
       assert.equal(staging.deleteKeys.includes(blocked.sourceKey), false);
+      const blockedWaitingHistory = await environment.client.workflow.getHandle(`media-upload:${blocked.id}`).fetchHistory();
+      assert.equal(blockedWaitingHistory.events.some((event) => event.timerStartedEventAttributes), false);
       assert.equal(staging.contentReads.get(concurrent.sourceKey), 1);
       assert.equal(staging.objects.has(concurrent.sourceKey), false);
       assert.equal(staging.deleteKeys.includes(concurrent.sourceKey), true);
+      assert.deepEqual(
+        staging.deleteKeys.filter((key) => key === preparedKey(concurrent.sourceKey) || key === concurrent.sourceKey),
+        [preparedKey(concurrent.sourceKey), concurrent.sourceKey],
+      );
       assert.equal(media.putCounts.get(concurrentOutputKey), 1);
     } finally {
       releaseBlockedGet();
       staging.getGate = undefined;
     }
+    await awaitUploadWorkflowWaiting(environment, staging, blocked.id, blocked.sourceKey);
+    await blockedCaller.signal("finishNexusUploadTest");
     await withTimeout(
       blockedResultPromise,
       WORKFLOW_TIMEOUT_MS,
@@ -610,7 +886,9 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     );
     await awaitUploadWorkflowWaiting(environment, staging, successful.id, successful.sourceKey);
     const outputKey = `original/${successful.id}.webp`;
-    assert.equal(staging.contentReads.get(successful.sourceKey) ?? 0, 0);
+    assert.equal(staging.contentReads.get(successful.sourceKey), 1);
+    const preparedOutputKey = preparedKey(successful.sourceKey);
+    const preparedBytes = Buffer.from(staging.objects.get(preparedOutputKey).bytes);
     assert.equal(media.putCounts.get(outputKey) ?? 0, 0);
     assert.equal(media.objects.has(outputKey), false);
 
@@ -619,6 +897,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.equal(JSON.stringify(history.events).includes(PNG_1X1.toString("base64")), false);
     const callerHistory = await environment.client.workflow.getHandle(successfulCaller.workflowId).fetchHistory();
     assert.equal(JSON.stringify(callerHistory.events).includes(PNG_1X1.toString("base64")), false);
+    staging.objects.delete(successful.sourceKey);
 
     const duplicate = { id: successful.id, sourceKey: `uploads/${successful.id}/${randomUUID()}` };
     staging.seed(duplicate.sourceKey, PNG_1X1);
@@ -633,7 +912,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.match(duplicateResult.error, /upload ID has already been used/i);
     assert.equal(staging.objects.has(duplicate.sourceKey), true);
     assert.equal(staging.deleteKeys.includes(duplicate.sourceKey), false);
-    assert.equal(staging.contentReads.get(successful.sourceKey) ?? 0, 0);
+    assert.equal(staging.contentReads.get(successful.sourceKey), 1);
 
     await stopWorker(worker);
     worker = await startWorker(environment, workflowBundle, staging, media, workerFailures);
@@ -658,6 +937,11 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.equal(staging.deleteKeys.includes(successful.sourceKey), true);
     const stored = media.objects.get(outputKey);
     assert(stored);
+    assert.deepEqual(stored.bytes, preparedBytes);
+    assert.deepEqual(
+      staging.deleteKeys.filter((key) => key === preparedOutputKey || key === successful.sourceKey),
+      [preparedOutputKey, successful.sourceKey],
+    );
     assert.equal(stored.bytes.toString("ascii", 0, 4), "RIFF");
     assert.equal(stored.bytes.toString("ascii", 8, 12), "WEBP");
 
@@ -671,7 +955,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     );
     await awaitUploadWorkflowWaiting(environment, staging, cleanupFailure.id, cleanupFailure.sourceKey);
     const cleanupFailureOutputKey = `original/${cleanupFailure.id}.webp`;
-    staging.failDeleteKey = cleanupFailure.sourceKey;
+    staging.transientDeleteKey = preparedKey(cleanupFailure.sourceKey);
     await cleanupFailureCaller.signal("finishNexusUploadTest");
     const cleanupFailureResult = await withTimeout(
       cleanupFailureCaller.result(),
@@ -680,8 +964,12 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     );
     assert.equal(media.objects.has(cleanupFailureOutputKey), true);
     assert.equal(media.putCounts.get(cleanupFailureOutputKey), 1);
-    assert.equal(staging.objects.has(cleanupFailure.sourceKey), true);
-    assert.equal(staging.deleteKeys.filter((key) => key === cleanupFailure.sourceKey).length, 1);
+    assert.equal(staging.objects.has(cleanupFailure.sourceKey), false);
+    assert.equal(staging.objects.has(preparedKey(cleanupFailure.sourceKey)), false);
+    assert.deepEqual(
+      staging.deleteKeys.filter((key) => key === preparedKey(cleanupFailure.sourceKey) || key === cleanupFailure.sourceKey),
+      [preparedKey(cleanupFailure.sourceKey), preparedKey(cleanupFailure.sourceKey), cleanupFailure.sourceKey],
+    );
     assert.deepEqual(cleanupFailureResult, {
       upload: {
         id: cleanupFailure.id,
@@ -690,6 +978,48 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       },
       publishResults: [{ id: cleanupFailure.id }, { id: cleanupFailure.id }],
     });
+
+    const terminalCleanupFailure = newUpload();
+    staging.seed(terminalCleanupFailure.sourceKey, PNG_1X1);
+    const terminalCleanupCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(terminalCleanupFailure.id, terminalCleanupFailure.sourceKey),
+      `terminal-cleanup-failure-caller:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(
+      environment,
+      staging,
+      terminalCleanupFailure.id,
+      terminalCleanupFailure.sourceKey,
+    );
+    const terminalPreparedKey = preparedKey(terminalCleanupFailure.sourceKey);
+    const terminalPreparedBytes = Buffer.from(staging.objects.get(terminalPreparedKey).bytes);
+    const terminalOutputKey = `original/${terminalCleanupFailure.id}.webp`;
+    staging.failDeleteKey = terminalPreparedKey;
+    await terminalCleanupCaller.signal("finishNexusUploadTest");
+    const terminalCleanupResult = await withTimeout(
+      terminalCleanupCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "published upload did not complete after terminal cleanup failure",
+    );
+    assert.deepEqual(terminalCleanupResult, {
+      upload: {
+        id: terminalCleanupFailure.id,
+        url: `${PUBLIC_BASE_URL}/${terminalOutputKey}`,
+        mediaType: "image/webp",
+      },
+      publishResults: [{ id: terminalCleanupFailure.id }, { id: terminalCleanupFailure.id }],
+    });
+    assert.deepEqual(media.objects.get(terminalOutputKey).bytes, terminalPreparedBytes);
+    assert.equal(staging.objects.has(terminalPreparedKey), true);
+    assert.equal(staging.objects.has(terminalCleanupFailure.sourceKey), true);
+    assert.deepEqual(
+      staging.deleteKeys.filter(
+        (key) => key === terminalPreparedKey || key === terminalCleanupFailure.sourceKey,
+      ),
+      [terminalPreparedKey],
+    );
 
     const completedPublish = await environment.client.workflow.start("nexusPublishCallerWorkflow", {
       workflowId: `publish-completed:${randomUUID()}`,
@@ -712,9 +1042,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       badImageInput,
       `bad-image-caller:${randomUUID()}`,
     );
-    await awaitUploadWorkflowWaiting(environment, staging, badImage.id, badImage.sourceKey);
-    staging.failDeleteKey = badImage.sourceKey;
-    await badImageCaller.signal("finishNexusUploadTest");
+    staging.failDeleteKey = preparedKey(badImage.sourceKey);
     const badImageResult = await withTimeout(
       badImageCaller.result(),
       WORKFLOW_TIMEOUT_MS,
@@ -724,8 +1052,11 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.doesNotMatch(badImageResult.error, /InjectedCleanupFailure|cleanup failure/i);
     assert.equal(media.putCounts.get(`original/${badImage.id}.webp`) ?? 0, 0);
     assert.equal(staging.objects.has(badImage.sourceKey), true);
+    assert.equal(staging.objects.has(preparedKey(badImage.sourceKey)), false);
     assert.equal(staging.contentReads.get(badImage.sourceKey), 1);
-    assert.equal(staging.deleteKeys.filter((key) => key === badImage.sourceKey).length, 1);
+    assert.deepEqual(staging.deleteKeys.slice(-1), [preparedKey(badImage.sourceKey)]);
+    const badImageHistory = await environment.client.workflow.getHandle(`media-upload:${badImage.id}`).fetchHistory();
+    assert.equal(badImageHistory.events.some((event) => event.timerStartedEventAttributes), false);
 
     for (const [label, lastModified] of [
       ["missing", null],
@@ -748,6 +1079,10 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       assert(result.error);
       assert.equal(staging.contentReads.get(source.sourceKey) ?? 0, 0);
       assert.equal(media.putCounts.get(`original/${source.id}.webp`) ?? 0, 0);
+      assert.deepEqual(
+        staging.deleteKeys.filter((key) => key === preparedKey(source.sourceKey) || key === source.sourceKey),
+        [preparedKey(source.sourceKey), source.sourceKey],
+      );
     }
 
     const expiring = newUpload();
@@ -757,19 +1092,41 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       PNG_1X1,
       new Date(Date.now() - 24 * 60 * 60 * 1000 + remainingLifetimeMs),
     );
+    let releaseExpiringGet;
+    let announceExpiringGet;
+    const expiringGetStarted = new Promise((resolve) => { announceExpiringGet = resolve; });
+    const expiringGet = new Promise((resolve) => { releaseExpiringGet = resolve; });
+    staging.getGate = {
+      key: expiring.sourceKey,
+      started: announceExpiringGet,
+      promise: expiringGet,
+    };
     const expiringCaller = await startCaller(
       environment,
       endpointName,
       uploadInput(expiring.id, expiring.sourceKey),
       `expiring-caller:${randomUUID()}`,
     );
-    await awaitUploadWorkflowWaiting(environment, staging, expiring.id, expiring.sourceKey);
+    try {
+      await withTimeout(expiringGetStarted, WORKFLOW_TIMEOUT_MS, "expiring upload did not start preparation");
+      await delay(remainingLifetimeMs + 100);
+    } finally {
+      releaseExpiringGet();
+      staging.getGate = undefined;
+    }
     await waitFor(
       () => !staging.objects.has(expiring.sourceKey) && staging.deleteKeys.includes(expiring.sourceKey),
       "short remaining-life upload did not expire and clean up",
     );
-    assert.equal(staging.contentReads.get(expiring.sourceKey) ?? 0, 0);
+    assert.equal(staging.contentReads.get(expiring.sourceKey), 1);
+    assert.equal(staging.objects.has(preparedKey(expiring.sourceKey)), false);
+    assert.deepEqual(
+      staging.deleteKeys.filter((key) => key === preparedKey(expiring.sourceKey) || key === expiring.sourceKey),
+      [preparedKey(expiring.sourceKey), expiring.sourceKey],
+    );
     assert.equal(media.putCounts.get(`original/${expiring.id}.webp`) ?? 0, 0);
+    const expiringHistory = await environment.client.workflow.getHandle(`media-upload:${expiring.id}`).fetchHistory();
+    assert.equal(expiringHistory.events.some((event) => event.timerStartedEventAttributes), false);
     const expiringResult = await withTimeout(
       expiringCaller.result(),
       5_000,
@@ -807,7 +1164,12 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
         staging.deleteKeys.includes(cancelled.sourceKey);
     }, "Nexus caller cancellation did not propagate and clean up the upload");
     assert.equal(staging.objects.has(cancelled.sourceKey), false);
-    assert.equal(staging.contentReads.get(cancelled.sourceKey) ?? 0, 0);
+    assert.equal(staging.objects.has(preparedKey(cancelled.sourceKey)), false);
+    assert.equal(staging.contentReads.get(cancelled.sourceKey), 1);
+    assert.deepEqual(
+      staging.deleteKeys.filter((key) => key === preparedKey(cancelled.sourceKey) || key === cancelled.sourceKey),
+      [preparedKey(cancelled.sourceKey), cancelled.sourceKey],
+    );
     assert.equal(media.putCounts.get(`original/${cancelled.id}.webp`) ?? 0, 0);
     assert.deepEqual(workerFailures, []);
   } finally {
