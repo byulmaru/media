@@ -80,6 +80,47 @@ describe("Temporal upload configuration", () => {
     }).success).toBe(false);
   });
 
+  it("enables the optional Hope poller only with an HTTPS endpoint and token", () => {
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_URL: "https://mac.tailnet.example",
+      HOPE_API_TOKEN: "hope-test-token-at-least-32-characters-long",
+    }).success).toBe(true);
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_URL: "https://mac.tailnet.example",
+    }).success).toBe(false);
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_TOKEN: "hope-test-token-at-least-32-characters-long",
+    }).success).toBe(false);
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_URL: "http://mac.tailnet.example",
+      HOPE_API_TOKEN: "hope-test-token-at-least-32-characters-long",
+    }).success).toBe(false);
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_URL: "https://mac.tailnet.example/protect",
+      HOPE_API_TOKEN: "hope-test-token-at-least-32-characters-long",
+    }).success).toBe(false);
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_URL: " https://mac.tailnet.example ",
+      HOPE_API_TOKEN: "hope-test-token-at-least-32-characters-long",
+    }).success).toBe(false);
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_URL: "https://mac.tailnet.example",
+      HOPE_API_TOKEN: "short",
+    }).success).toBe(false);
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_URL: "https://mac.tailnet.example",
+      HOPE_API_TOKEN: "hope-test-token-with-spaces is-not-valid",
+    }).success).toBe(false);
+  });
+
   it.each([
     ["Temporal address", { TEMPORAL_ADDRESS: " " }],
     ["AWS access key", { AWS_ACCESS_KEY_ID: "" }],
