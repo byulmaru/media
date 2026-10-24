@@ -84,7 +84,7 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
       nexusServices: [createMediaServiceHandler({ hopeEnabled: config.HOPE_ENABLED })],
       maxConcurrentActivityTaskExecutions: 4,
     }));
-    if (config.HOPE_API_URL && config.HOPE_API_TOKEN) {
+    if (config.HOPE_API_URL) {
       workers.push(await Worker.create({
         connection,
         namespace: config.TEMPORAL_NAMESPACE,
@@ -92,7 +92,6 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
         activities: createHopeProcessingActivities(
           staging,
           config.HOPE_API_URL,
-          config.HOPE_API_TOKEN,
         ),
         maxConcurrentActivityTaskExecutions: 1,
         maxHeartbeatThrottleInterval: "5 seconds",

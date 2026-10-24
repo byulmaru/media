@@ -2218,7 +2218,6 @@ test("Hope worker starts with five-second heartbeat throttling and concurrency o
       AWS_ACCESS_KEY_ID: "test-access-key",
       AWS_SECRET_ACCESS_KEY: "test-secret-key",
       HOPE_API_URL: "https://hope.example",
-      HOPE_API_TOKEN: "hope-test-token-at-least-32-characters-long",
     });
   } finally {
     NativeConnection.connect = originalConnect;
@@ -2241,7 +2240,6 @@ test("Media Hope Activity validates and stores the returned WebP idempotently", 
   const activity = createHopeProcessingActivities(
     staging,
     "https://hope.tailnet.example",
-    "hope-test-token-at-least-32-characters-long",
     async (url, options) => {
       requests.push({ url, options });
       return hopeResponse(protectedBytes, metadata.width, metadata.height);
@@ -2264,7 +2262,7 @@ test("Media Hope Activity validates and stores the returned WebP idempotently", 
     quality: "80",
   });
   assert.equal(requests[0].options.method, "POST");
-  assert.equal(requests[0].options.headers.authorization, "Bearer hope-test-token-at-least-32-characters-long");
+  assert.equal(Object.hasOwn(requests[0].options.headers, "authorization"), false);
   assert.equal(requests[0].options.headers["content-type"], "application/octet-stream");
   assert.equal(requests[0].options.body.byteLength, PNG_RGBA_2X1.byteLength);
   assert.deepEqual(stored.httpMetadata, { contentType: "image/webp" });
@@ -2281,7 +2279,6 @@ test("Media Hope Activity preserves source validation, expiry and remote retry c
     expiredEnvironment.run(createHopeProcessingActivities(
       expiredStaging,
       "https://hope.tailnet.example",
-      "hope-test-token-at-least-32-characters-long",
       unexpectedFetch,
     ).prepareHopeUpload, expired),
     (error) => error instanceof ApplicationFailure && error.type === "UploadExpiredError" && error.nonRetryable,
@@ -2299,7 +2296,6 @@ test("Media Hope Activity preserves source validation, expiry and remote retry c
       environment.run(createHopeProcessingActivities(
         staging,
         "https://hope.tailnet.example",
-        "hope-test-token-at-least-32-characters-long",
         unexpectedFetch,
       ).prepareHopeUpload, input),
       (error) => error instanceof ApplicationFailure && error.type === "UploadValidationError" && error.nonRetryable,
@@ -2319,7 +2315,6 @@ test("Media Hope Activity preserves source validation, expiry and remote retry c
       environment.run(createHopeProcessingActivities(
         staging,
         "https://hope.tailnet.example",
-        "hope-test-token-at-least-32-characters-long",
         async () => new Response("internal server detail", { status }),
       ).prepareHopeUpload, input),
       (error) => error instanceof ApplicationFailure &&
@@ -2338,7 +2333,6 @@ test("Media Hope Activity preserves source validation, expiry and remote retry c
     networkEnvironment.run(createHopeProcessingActivities(
       networkStaging,
       "https://hope.tailnet.example",
-      "hope-test-token-at-least-32-characters-long",
       async () => { throw new Error("internal transport detail"); },
     ).prepareHopeUpload, networkInput),
     (error) => error instanceof ApplicationFailure && error.type === HOPE_PROCESSING_ERROR_TYPE &&
@@ -2373,7 +2367,6 @@ test("Media Hope Activity rejects malformed, mismatched and oversized HTTP outpu
       environment.run(createHopeProcessingActivities(
         staging,
         "https://hope.tailnet.example",
-        "hope-test-token-at-least-32-characters-long",
         async () => response,
       ).prepareHopeUpload, input),
       (error) => error instanceof ApplicationFailure && error.type === HOPE_PROCESSING_ERROR_TYPE && error.nonRetryable,
@@ -2394,7 +2387,6 @@ test("Media Hope Activity aborts HTTP on cancellation and waits for a pending R2
   const requestTask = requestEnvironment.run(createHopeProcessingActivities(
     staging,
     "https://hope.tailnet.example",
-    "hope-test-token-at-least-32-characters-long",
     async (_url, options) => {
       requestStarted.resolve();
       return new Promise((_, reject) => {
@@ -2428,7 +2420,6 @@ test("Media Hope Activity aborts HTTP on cancellation and waits for a pending R2
   const writeTask = writeEnvironment.run(createHopeProcessingActivities(
     writeStaging,
     "https://hope.tailnet.example",
-    "hope-test-token-at-least-32-characters-long",
     async () => hopeResponse(protectedBytes, 2, 1),
   ).prepareHopeUpload, writeInput).finally(() => { writeTaskSettled = true; });
   await writeStarted.promise;

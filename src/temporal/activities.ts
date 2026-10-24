@@ -211,7 +211,6 @@ function isHopePreparedUpload(object: Awaited<ReturnType<UploadStagingStorage["h
 export function createHopeProcessingActivities(
   staging: UploadStagingStorage,
   apiUrl: string,
-  apiToken: string,
   requestHopeResponse: HopeHttpRequest = requestHope,
 ) {
   return {
@@ -288,7 +287,6 @@ export function createHopeProcessingActivities(
           response = await requestHopeResponse(url, {
             method: "POST",
             headers: {
-              authorization: `Bearer ${apiToken}`,
               "content-type": "application/octet-stream",
             },
             body: Buffer.from(sourceBytes),

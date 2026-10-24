@@ -61,11 +61,6 @@ spec:
 {{ with .Values.hope.apiUrl }}
             - name: HOPE_API_URL
               value: {{ . | quote }}
-            - name: HOPE_API_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: env
-                  key: HOPE_API_TOKEN
 {{ end }}
             - name: AWS_ACCESS_KEY_ID
               valueFrom:

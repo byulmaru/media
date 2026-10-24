@@ -60,8 +60,6 @@ const hopeApiUrlSchema = untrimmedUrlSchema
   .pipe(z.url({ protocol: /^https$/ }))
   .pipe(z.string().refine((value) => new URL(value).origin === value));
 
-const hopeApiTokenSchema = z.string().regex(/^[\x21-\x7E]{32,}$/);
-
 const digitsOnlyPortSchema = z
   .string()
   .regex(/^\d+$/)
@@ -95,10 +93,8 @@ export const temporalUploadConfigSchema = z.object({
   AWS_SECRET_ACCESS_KEY: nonWhitespaceNodeValueSchema,
   R2_STAGING_BUCKET_NAME: nonWhitespaceNodeValueSchema,
   HOPE_API_URL: hopeApiUrlSchema.optional(),
-  HOPE_API_TOKEN: hopeApiTokenSchema.optional(),
 })
-  .refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME)
-  .refine((config) => (config.HOPE_API_URL === undefined) === (config.HOPE_API_TOKEN === undefined));
+  .refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME);
 
 const limits = {
   maxBytes: z
