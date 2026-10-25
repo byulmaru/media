@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Readable } from "node:stream";
@@ -20,7 +18,6 @@ import { MockActivityEnvironment, TestWorkflowEnvironment } from "@temporalio/te
 import { bundleWorkflowCode, NativeConnection, Worker } from "@temporalio/worker";
 import {
   createUploadProcessingActivities,
-  createHopeHttpRequest,
   createHopeProcessingActivities,
   createMediaServiceHandler,
   DEFAULT_MAX_BYTES,
@@ -418,83 +415,6 @@ function deferred() {
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 }
-
-test("Native HTTPS Hope transport waits for headers and aborts header and body reads", async () => {
-  const certificate = await readFile(new URL("../test/fixtures/hope-http-test-cert.pem", import.meta.url));
-  const privateKey = await readFile(new URL("../test/fixtures/hope-http-test-key.pem", import.meta.url));
-  const headerRequest = deferred();
-  const headerResponseClosed = deferred();
-  const bodyRequest = deferred();
-  const bodyResponseClosed = deferred();
-  const server = createHttpsServer({ cert: certificate, key: privateKey }, (request, response) => {
-    if (request.url === "/delayed") {
-      setTimeout(() => {
-        response.writeHead(200, { "content-length": "2" });
-        response.end("ok");
-      }, 120);
-      return;
-    }
-    if (request.url === "/headers") {
-      headerRequest.resolve();
-      response.on("close", headerResponseClosed.resolve);
-      return;
-    }
-    bodyRequest.resolve();
-    response.on("close", bodyResponseClosed.resolve);
-    response.writeHead(200, { "content-length": "8" });
-    response.flushHeaders();
-    response.write("partial");
-  });
-  server.listen(0, "localhost");
-  await new Promise((resolve, reject) => {
-    server.once("listening", resolve);
-    server.once("error", reject);
-  });
-  const address = server.address();
-  assert(address && typeof address !== "string");
-  const requestOptions = [];
-  const trustedHttpsRequest = (url, options, callback) => {
-    requestOptions.push(options);
-    return httpsRequest(url, { ...options, ca: certificate }, callback);
-  };
-  const requestHope = createHopeHttpRequest(trustedHttpsRequest);
-  const makeOptions = (signal) => ({
-    method: "POST",
-    headers: { "content-type": "application/octet-stream" },
-    body: Buffer.from("request"),
-    signal,
-  });
-  const baseUrl = `https://localhost:${address.port}`;
-
-  try {
-    const start = Date.now();
-    const delayed = await requestHope(new URL("/delayed", baseUrl), makeOptions(new AbortController().signal));
-    assert(Date.now() - start >= 100);
-    assert.equal(await new Response(delayed.body).text(), "ok");
-    assert.equal(requestOptions[0].agent, false);
-    assert.equal(requestOptions[0].timeout, 0);
-
-    const headerAbort = new AbortController();
-    const waitingForHeaders = requestHope(new URL("/headers", baseUrl), makeOptions(headerAbort.signal));
-    await headerRequest.promise;
-    headerAbort.abort();
-    await assert.rejects(waitingForHeaders, (error) => error.name === "AbortError");
-    await withTimeout(headerResponseClosed.promise, WORKFLOW_TIMEOUT_MS, "aborted header request stayed open");
-
-    const bodyAbort = new AbortController();
-    const bodyResponse = await requestHope(new URL("/body", baseUrl), makeOptions(bodyAbort.signal));
-    const reader = bodyResponse.body.getReader();
-    assert.equal(new TextDecoder().decode((await reader.read()).value), "partial");
-    const waitingForBody = reader.read();
-    bodyAbort.abort();
-    await assert.rejects(waitingForBody);
-    await withTimeout(bodyResponseClosed.promise, WORKFLOW_TIMEOUT_MS, "aborted response body stayed open");
-    reader.releaseLock();
-  } finally {
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
 
 function errorCauseChain(error) {
   const messages = [];

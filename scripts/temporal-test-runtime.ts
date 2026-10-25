@@ -1,5 +1,5 @@
 export { createUploadProcessingActivities } from "../src/temporal/activities";
-export { createHopeHttpRequest, createHopeProcessingActivities } from "../src/temporal/activities";
+export { createHopeProcessingActivities } from "../src/temporal/activities";
 export { runWorkerGroup, startWorker } from "../src/temporal/worker";
 export { DEFAULT_MAX_BYTES } from "../src/constants";
 export { hopePreparedUploadKey } from "../src/prepared-upload";

@@ -59,36 +59,32 @@ type HopeHttpRequestOptions = {
 
 type HopeHttpRequest = (url: URL, options: HopeHttpRequestOptions) => Promise<HopeHttpResponse>;
 
-export function createHopeHttpRequest(createRequest: typeof httpsRequest = httpsRequest): HopeHttpRequest {
-  return (url, options) => new Promise((resolve, reject) => {
-    const request = createRequest(url, {
-      method: options.method,
-      headers: {
-        ...options.headers,
-        "content-length": String(options.body.byteLength),
-      },
-      agent: false,
-      timeout: 0,
-      signal: options.signal,
-    }, (response) => {
-      const status = response.statusCode ?? 502;
-      const headers = new Headers();
-      for (const name of hopeResponseHeaders) {
-        const value = response.headers[name];
-        if (typeof value === "string") headers.set(name, value);
-      }
-      const body = status === 204 || status === 304
-        ? null
-        : Readable.toWeb(response) as ReadableStream<Uint8Array>;
-      if (body === null) response.destroy();
-      resolve({ status, headers, body });
-    });
-    request.once("error", reject);
-    request.end(options.body);
+const requestHope: HopeHttpRequest = (url, options) => new Promise((resolve, reject) => {
+  const request = httpsRequest(url, {
+    method: options.method,
+    headers: {
+      ...options.headers,
+      "content-length": String(options.body.byteLength),
+    },
+    agent: false,
+    timeout: 0,
+    signal: options.signal,
+  }, (response) => {
+    const status = response.statusCode ?? 502;
+    const headers = new Headers();
+    for (const name of hopeResponseHeaders) {
+      const value = response.headers[name];
+      if (typeof value === "string") headers.set(name, value);
+    }
+    const body = status === 204 || status === 304
+      ? null
+      : Readable.toWeb(response) as ReadableStream<Uint8Array>;
+    if (body === null) response.destroy();
+    resolve({ status, headers, body });
   });
-}
-
-const requestHope = createHopeHttpRequest();
+  request.once("error", reject);
+  request.end(options.body);
+});
 
 function asNonRetryableValidationFailure(error: unknown): ApplicationFailure | undefined {
   if (
