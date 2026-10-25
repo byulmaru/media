@@ -24,6 +24,10 @@ spec:
         app.kubernetes.io/version: {{ .Values.version | quote }}
     spec:
       automountServiceAccountToken: false
+{{ with .Values.worker.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+{{ end }}
       containers:
         - name: worker
           image: {{ printf "ghcr.io/byulmaru/media:%s@%s" .Values.version .Values.imageDigest | quote }}
@@ -54,6 +58,10 @@ spec:
               value: {{ .Values.temporal.taskQueue | quote }}
             - name: HOPE_ENABLED
               value: {{ .Values.hope.enabled | quote }}
+{{ with .Values.hope.apiUrl }}
+            - name: HOPE_API_URL
+              value: {{ . | quote }}
+{{ end }}
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

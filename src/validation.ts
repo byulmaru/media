@@ -56,6 +56,10 @@ export const runtimeConfigSchema = z.object({
 
 const nonWhitespaceNodeValueSchema = z.string().refine((value) => value.trim().length > 0);
 
+const hopeApiUrlSchema = untrimmedUrlSchema
+  .pipe(z.url({ protocol: /^https$/ }))
+  .pipe(z.string().refine((value) => new URL(value).origin === value));
+
 const digitsOnlyPortSchema = z
   .string()
   .regex(/^\d+$/)
@@ -88,7 +92,9 @@ export const temporalUploadConfigSchema = z.object({
   AWS_ACCESS_KEY_ID: nonWhitespaceNodeValueSchema,
   AWS_SECRET_ACCESS_KEY: nonWhitespaceNodeValueSchema,
   R2_STAGING_BUCKET_NAME: nonWhitespaceNodeValueSchema,
-}).refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME);
+  HOPE_API_URL: hopeApiUrlSchema.optional(),
+})
+  .refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME);
 
 const limits = {
   maxBytes: z

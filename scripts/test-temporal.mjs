@@ -12,12 +12,13 @@ import {
   S3Client,
   S3ServiceException,
 } from "@aws-sdk/client-s3";
-import { ApplicationFailure, Context, heartbeat } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure, Context, heartbeat } from "@temporalio/activity";
 import { defaultPayloadConverter } from "@temporalio/client";
-import { TestWorkflowEnvironment } from "@temporalio/testing";
-import { bundleWorkflowCode, Worker } from "@temporalio/worker";
+import { MockActivityEnvironment, TestWorkflowEnvironment } from "@temporalio/testing";
+import { bundleWorkflowCode, NativeConnection, Worker } from "@temporalio/worker";
 import {
   createUploadProcessingActivities,
+  createHopeProcessingActivities,
   createMediaServiceHandler,
   DEFAULT_MAX_BYTES,
   HOPE_PROCESSING_ERROR_TYPE,
@@ -28,6 +29,8 @@ import {
   PNG_RGBA_2X1,
   R2S3MediaStorage,
   R2S3StagingStorage,
+  runWorkerGroup,
+  startWorker as startConfiguredWorker,
 } from "../dist/temporal/test-runtime.js";
 
 const PNG_1X1 = Buffer.from(
@@ -37,6 +40,34 @@ const PNG_1X1 = Buffer.from(
 const PUBLIC_BASE_URL = "https://media.byulma.run";
 const TASK_QUEUE = "media-nexus-tests";
 const WORKFLOW_TIMEOUT_MS = 10_000;
+
+function hopeActivityInput(options = {}) {
+  const id = options.id ?? `u_${randomUUID()}`;
+  return {
+    id,
+    sourceKey: options.sourceKey ?? `uploads/${id}/${randomUUID()}`,
+    contentType: "image/png",
+    maxBytes: DEFAULT_MAX_BYTES,
+    maxDimension: 8192,
+    requestId: randomUUID(),
+    maxEdge: 1024,
+    hope: { algorithm: "nightshade", iterations: 750, intensity: 0.3 },
+    ...options,
+  };
+}
+
+function hopeResponse(bytes, width, height, headers = {}) {
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      "content-type": "image/webp",
+      "x-hope-model-calls": "1",
+      "x-hope-width": String(width),
+      "x-hope-height": String(height),
+      ...headers,
+    },
+  });
+}
 
 test("staging adapter maps missing metadata and bounds streamed reads", async () => {
   const lastModified = new Date("2026-10-20T00:00:00.000Z");
@@ -454,6 +485,7 @@ async function startHopeWorker(environment, prepareHopeUpload, failures) {
       },
     },
     maxConcurrentActivityTaskExecutions: 1,
+    defaultHeartbeatThrottleInterval: 5_000,
     maxHeartbeatThrottleInterval: 5_000,
   });
   const run = worker.run().catch((error) => { failures.push(error); });
@@ -1982,4 +2014,340 @@ test("Hope expiry cancels queued processing and caller cancellation drains an in
     await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
     await environment.teardown();
   }
+});
+
+test("worker group drains an initialized worker when peer creation fails", async () => {
+  const creationError = new Error("Hope worker creation failed");
+  let drained = false;
+  let closed = false;
+  const uploadWorker = {
+    run() { assert.fail("worker must not poll before the worker group is complete"); },
+    async runUntil(promise) {
+      drained = true;
+      await promise;
+    },
+    shutdown() { assert.fail("runUntil owns initialized worker shutdown"); },
+  };
+
+  await assert.rejects(
+    runWorkerGroup(async (workers) => {
+      workers.push(uploadWorker);
+      throw creationError;
+    }, async () => {
+      assert.equal(drained, true);
+      closed = true;
+    }),
+    (error) => error === creationError,
+  );
+  assert.equal(drained, true);
+  assert.equal(closed, true);
+});
+
+test("worker group stops and settles the sibling before closing a shared connection", async () => {
+  const workerFailure = new Error("media queue worker failed");
+  const siblingStopped = deferred();
+  let siblingSettled = false;
+  let connectionClosed = false;
+  const failedWorker = {
+    run() { return Promise.reject(workerFailure); },
+    async runUntil() {},
+    shutdown() { assert.fail("failed worker is already stopped"); },
+  };
+  const hopeWorker = {
+    run() {
+      return siblingStopped.promise.then(() => {
+        siblingSettled = true;
+      });
+    },
+    async runUntil() {},
+    shutdown() { siblingStopped.resolve(); },
+  };
+
+  await assert.rejects(
+    runWorkerGroup(async (workers) => {
+      workers.push(failedWorker, hopeWorker);
+    }, async () => {
+      assert.equal(siblingSettled, true);
+      connectionClosed = true;
+    }),
+    (error) => error === workerFailure,
+  );
+  assert.equal(siblingSettled, true);
+  assert.equal(connectionClosed, true);
+});
+
+test("worker group waits for all workers after a shared shutdown signal", async () => {
+  const started = deferred();
+  let startCount = 0;
+  let settledCount = 0;
+  let closed = false;
+  const createWorker = () => {
+    let finish;
+    let stopped = false;
+    return {
+      run() {
+        startCount += 1;
+        if (startCount === 2) started.resolve();
+        return new Promise((resolve) => {
+          finish = () => {
+            settledCount += 1;
+            resolve();
+          };
+        });
+      },
+      async runUntil() {},
+      shutdown() {
+        if (stopped) return;
+        stopped = true;
+        finish();
+      },
+    };
+  };
+  const workers = [createWorker(), createWorker()];
+  const running = runWorkerGroup(async (created) => {
+    created.push(...workers);
+  }, async () => {
+    assert.equal(settledCount, 2);
+    closed = true;
+  });
+
+  await started.promise;
+  for (const worker of workers) worker.shutdown();
+  await running;
+  assert.equal(closed, true);
+});
+
+test("Hope worker starts with five-second heartbeat throttling and concurrency one", async () => {
+  const originalConnect = NativeConnection.connect;
+  const originalCreate = Worker.create;
+  const options = [];
+  NativeConnection.connect = async () => ({ close: async () => {} });
+  Worker.create = async (workerOptions) => {
+    options.push(workerOptions);
+    return { run: async () => {}, runUntil: async () => {}, shutdown() {} };
+  };
+  try {
+    await startConfiguredWorker({
+      TEMPORAL_ADDRESS: "localhost:7233",
+      TEMPORAL_NAMESPACE: "media",
+      TEMPORAL_TASK_QUEUE: "media-upload",
+      PUBLIC_BASE_URL: "https://media.example",
+      R2_ENDPOINT: "https://r2.example",
+      R2_BUCKET_NAME: "media",
+      R2_STAGING_BUCKET_NAME: "media-staging",
+      AWS_ACCESS_KEY_ID: "test-access-key",
+      AWS_SECRET_ACCESS_KEY: "test-secret-key",
+      HOPE_API_URL: "https://hope.example",
+    });
+  } finally {
+    NativeConnection.connect = originalConnect;
+    Worker.create = originalCreate;
+  }
+  assert.equal(options.length, 2);
+  assert.equal(options[1].taskQueue, HOPE_TASK_QUEUE);
+  assert.equal(options[1].maxConcurrentActivityTaskExecutions, 1);
+  assert.equal(options[1].maxHeartbeatThrottleInterval, "5 seconds");
+  assert.equal(options[1].defaultHeartbeatThrottleInterval, "5 seconds");
+});
+
+test("Media Hope Activity validates and stores the returned WebP idempotently", async () => {
+  const input = hopeActivityInput();
+  const staging = new MemoryStagingStorage();
+  staging.seed(input.sourceKey, PNG_RGBA_2X1);
+  const protectedBytes = await sharp(Buffer.from(PNG_RGBA_2X1)).webp({ quality: 80 }).toBuffer();
+  const metadata = await sharp(protectedBytes).metadata();
+  const requests = [];
+  const activity = createHopeProcessingActivities(
+    staging,
+    "https://hope.tailnet.example",
+    async (url, options) => {
+      requests.push({ url, options });
+      return hopeResponse(protectedBytes, metadata.width, metadata.height);
+    },
+  ).prepareHopeUpload;
+  const environment = new MockActivityEnvironment();
+
+  await environment.run(activity, input);
+  await environment.run(activity, input);
+
+  const key = hopePreparedUploadKey(input.sourceKey, input.requestId);
+  const stored = staging.objects.get(key);
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0].url).pathname, "/protect");
+  assert.deepEqual(Object.fromEntries(new URL(requests[0].url).searchParams), {
+    algorithm: "nightshade",
+    iterations: "750",
+    intensity: "0.3",
+    max_edge: "1024",
+    quality: "80",
+  });
+  assert.equal(requests[0].options.method, "POST");
+  assert.equal(Object.hasOwn(requests[0].options.headers, "authorization"), false);
+  assert.equal(requests[0].options.headers["content-type"], "application/octet-stream");
+  assert.equal(requests[0].options.body.byteLength, PNG_RGBA_2X1.byteLength);
+  assert.deepEqual(stored.httpMetadata, { contentType: "image/webp" });
+  assert.deepEqual(stored.bytes, protectedBytes);
+});
+
+test("Media Hope Activity preserves source validation, expiry and remote retry classification", async () => {
+  const expired = hopeActivityInput();
+  const expiredStaging = new MemoryStagingStorage();
+  expiredStaging.seed(expired.sourceKey, PNG_RGBA_2X1, new Date(Date.now() - 25 * 60 * 60 * 1000));
+  const unexpectedFetch = async () => assert.fail("expired source must not call Hope");
+  const expiredEnvironment = new MockActivityEnvironment();
+  await assert.rejects(
+    expiredEnvironment.run(createHopeProcessingActivities(
+      expiredStaging,
+      "https://hope.tailnet.example",
+      unexpectedFetch,
+    ).prepareHopeUpload, expired),
+    (error) => error instanceof ApplicationFailure && error.type === "UploadExpiredError" && error.nonRetryable,
+  );
+
+  for (const [label, source, maxBytes] of [
+    ["oversized", PNG_RGBA_2X1, PNG_RGBA_2X1.byteLength - 1],
+    ["corrupt", Buffer.from("not an image"), DEFAULT_MAX_BYTES],
+  ]) {
+    const input = hopeActivityInput({ maxBytes });
+    const staging = new MemoryStagingStorage();
+    staging.seed(input.sourceKey, source);
+    const environment = new MockActivityEnvironment();
+    await assert.rejects(
+      environment.run(createHopeProcessingActivities(
+        staging,
+        "https://hope.tailnet.example",
+        unexpectedFetch,
+      ).prepareHopeUpload, input),
+      (error) => error instanceof ApplicationFailure && error.type === "UploadValidationError" && error.nonRetryable,
+      label,
+    );
+  }
+
+  for (const [status, retryable] of [
+    [400, false], [401, false], [403, false], [404, false], [413, false], [415, false], [422, false],
+    [408, true], [429, true], [503, true], [500, true], [302, false],
+  ]) {
+    const input = hopeActivityInput();
+    const staging = new MemoryStagingStorage();
+    staging.seed(input.sourceKey, PNG_RGBA_2X1);
+    const environment = new MockActivityEnvironment();
+    await assert.rejects(
+      environment.run(createHopeProcessingActivities(
+        staging,
+        "https://hope.tailnet.example",
+        async () => new Response("internal server detail", { status }),
+      ).prepareHopeUpload, input),
+      (error) => error instanceof ApplicationFailure &&
+        error.type === HOPE_PROCESSING_ERROR_TYPE && error.nonRetryable === !retryable &&
+        !error.message.includes("internal server detail"),
+      `HTTP ${status}`,
+    );
+    assert.equal(staging.putStreamKeys.length, 0);
+  }
+
+  const networkInput = hopeActivityInput();
+  const networkStaging = new MemoryStagingStorage();
+  networkStaging.seed(networkInput.sourceKey, PNG_RGBA_2X1);
+  const networkEnvironment = new MockActivityEnvironment();
+  await assert.rejects(
+    networkEnvironment.run(createHopeProcessingActivities(
+      networkStaging,
+      "https://hope.tailnet.example",
+      async () => { throw new Error("internal transport detail"); },
+    ).prepareHopeUpload, networkInput),
+    (error) => error instanceof ApplicationFailure && error.type === HOPE_PROCESSING_ERROR_TYPE &&
+      !error.nonRetryable && !error.message.includes("internal transport detail"),
+  );
+});
+
+test("Media Hope Activity rejects malformed, mismatched and oversized HTTP output", async () => {
+  const protectedBytes = await sharp(Buffer.from(PNG_RGBA_2X1)).webp({ quality: 80 }).toBuffer();
+  const largeBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(DEFAULT_MAX_BYTES + 1));
+    },
+    cancel() {
+      largeBodyCancelled = true;
+    },
+  });
+  let largeBodyCancelled = false;
+  const cases = [
+    ["missing model calls", hopeResponse(protectedBytes, 2, 1, { "x-hope-model-calls": "0" })],
+    ["mismatched dimensions", hopeResponse(protectedBytes, 1, 1)],
+    ["corrupt WebP", hopeResponse(Buffer.from("invalid"), 1, 1)],
+    ["oversized streamed body", hopeResponse(largeBody, 2, 1)],
+  ];
+
+  for (const [label, response] of cases) {
+    const input = hopeActivityInput();
+    const staging = new MemoryStagingStorage();
+    staging.seed(input.sourceKey, PNG_RGBA_2X1);
+    const environment = new MockActivityEnvironment();
+    await assert.rejects(
+      environment.run(createHopeProcessingActivities(
+        staging,
+        "https://hope.tailnet.example",
+        async () => response,
+      ).prepareHopeUpload, input),
+      (error) => error instanceof ApplicationFailure && error.type === HOPE_PROCESSING_ERROR_TYPE && error.nonRetryable,
+      label,
+    );
+    assert.equal(staging.putStreamKeys.length, 0);
+  }
+  assert.equal(largeBodyCancelled, true);
+});
+
+test("Media Hope Activity aborts HTTP on cancellation and waits for a pending R2 write", async () => {
+  const input = hopeActivityInput();
+  const staging = new MemoryStagingStorage();
+  staging.seed(input.sourceKey, PNG_RGBA_2X1);
+  const requestStarted = deferred();
+  let requestAborted = false;
+  const requestEnvironment = new MockActivityEnvironment();
+  const requestTask = requestEnvironment.run(createHopeProcessingActivities(
+    staging,
+    "https://hope.tailnet.example",
+    async (_url, options) => {
+      requestStarted.resolve();
+      return new Promise((_, reject) => {
+        options.signal.addEventListener("abort", () => {
+          requestAborted = true;
+          reject(options.signal.reason);
+        }, { once: true });
+      });
+    },
+  ).prepareHopeUpload, input);
+  await requestStarted.promise;
+  requestEnvironment.cancel();
+  await assert.rejects(requestTask, (error) => error instanceof CancelledFailure);
+  assert.equal(requestAborted, true);
+  assert.equal(staging.putStreamKeys.length, 0);
+
+  const writeInput = hopeActivityInput();
+  const writeStaging = new MemoryStagingStorage();
+  writeStaging.seed(writeInput.sourceKey, PNG_RGBA_2X1);
+  const protectedBytes = await sharp(Buffer.from(PNG_RGBA_2X1)).webp({ quality: 80 }).toBuffer();
+  const writeKey = hopePreparedUploadKey(writeInput.sourceKey, writeInput.requestId);
+  const writeStarted = deferred();
+  const writeGate = deferred();
+  writeStaging.putGate = {
+    matches: (key) => key === writeKey,
+    started: () => writeStarted.resolve(),
+    promise: writeGate.promise,
+  };
+  const writeEnvironment = new MockActivityEnvironment();
+  let writeTaskSettled = false;
+  const writeTask = writeEnvironment.run(createHopeProcessingActivities(
+    writeStaging,
+    "https://hope.tailnet.example",
+    async () => hopeResponse(protectedBytes, 2, 1),
+  ).prepareHopeUpload, writeInput).finally(() => { writeTaskSettled = true; });
+  await writeStarted.promise;
+  writeEnvironment.cancel();
+  await delay(0);
+  assert.equal(writeTaskSettled, false);
+  writeGate.resolve();
+  await assert.rejects(writeTask, (error) => error instanceof CancelledFailure);
+  assert.equal(writeTaskSettled, true);
+  assert.equal(writeStaging.objects.has(writeKey), true);
 });

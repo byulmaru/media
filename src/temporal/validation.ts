@@ -10,9 +10,11 @@ import type {
   ApplyHopeRequestEnvelope,
   ApplyHopeRequestSignal,
   ApplyHopeWorkflowReply,
+  HopeProcessingInput,
   UploadSourceCleanupInput,
 } from "./types";
 import {
+  HOPE_MAX_EDGE,
   HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH,
   APPLY_HOPE_REPLY_ERROR_TYPES,
   APPLY_HOPE_WORKFLOW_ID_PREFIX,
@@ -72,6 +74,16 @@ export const hopeOptionsSchema = z.discriminatedUnion("algorithm", [
   }),
 ]);
 
+export const hopeProcessingInputSchema = z.strictObject({
+  ...processUploadFields,
+  requestId: uuidSchema,
+  maxEdge: z.literal(HOPE_MAX_EDGE),
+  hope: z.unknown()
+    .refine((value) => typeof value === "object" && value !== null &&
+      "intensity" in value && typeof value.intensity === "number")
+    .pipe(hopeOptionsSchema),
+}).refine((input) => input.sourceKey.split("/")[1] === input.id);
+
 export const applyHopeInputSchema = z.strictObject({
   id: uploadIdSchema,
   hope: hopeOptionsSchema.nullable(),
@@ -125,6 +137,11 @@ export function parseUploadSourceCleanupInput(
 
 export function parseHopeOptions(input: unknown): NormalizedHopeOptions | undefined {
   const parsed = hopeOptionsSchema.safeParse(input);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function parseHopeProcessingInput(input: unknown): HopeProcessingInput | undefined {
+  const parsed = hopeProcessingInputSchema.safeParse(input);
   return parsed.success ? parsed.data : undefined;
 }
 

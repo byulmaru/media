@@ -5,8 +5,49 @@ import { fileURLToPath } from "node:url";
 import { createR2S3MediaStorage } from "../storage/r2-s3";
 import { createR2S3StagingStorage } from "../storage/staging";
 import { temporalUploadConfigSchema } from "../validation";
-import { createUploadProcessingActivities } from "./activities";
+import { createHopeProcessingActivities, createUploadProcessingActivities } from "./activities";
 import { createMediaServiceHandler } from "./nexus";
+import { HOPE_TASK_QUEUE } from "./types";
+
+type WorkerLifecycle = Pick<Worker, "run" | "runUntil" | "shutdown">;
+
+export async function runWorkerGroup(
+  createWorkers: (workers: WorkerLifecycle[]) => Promise<void>,
+  closeConnection: () => Promise<void>,
+): Promise<void> {
+  const workers: WorkerLifecycle[] = [];
+  try {
+    try {
+      await createWorkers(workers);
+    } catch (error) {
+      await Promise.allSettled(
+        workers.map((worker) => worker.runUntil(Promise.reject(error))),
+      );
+      throw error;
+    }
+
+    const runs = workers.map((worker) => worker.run());
+    const first = await Promise.race(runs.map((run, index) =>
+      run.then(
+        () => workers[index]!,
+        () => workers[index]!,
+      )
+    ));
+    for (const worker of workers) {
+      if (worker === first) continue;
+      try {
+        worker.shutdown();
+      } catch {
+        continue;
+      }
+    }
+    const outcomes = await Promise.allSettled(runs);
+    const failure = outcomes.find((outcome) => outcome.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  } finally {
+    await closeConnection();
+  }
+}
 
 function readWorkerConfig(source: NodeJS.ProcessEnv) {
   const temporal = temporalUploadConfigSchema.safeParse(source);
@@ -31,8 +72,8 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
     secretAccessKey: config.AWS_SECRET_ACCESS_KEY,
   });
   const connection = await NativeConnection.connect({ address: config.TEMPORAL_ADDRESS });
-  try {
-    const worker = await Worker.create({
+  await runWorkerGroup(async (workers) => {
+    workers.push(await Worker.create({
       connection,
       namespace: config.TEMPORAL_NAMESPACE,
       taskQueue: config.TEMPORAL_TASK_QUEUE,
@@ -42,11 +83,22 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
       activities: createUploadProcessingActivities(staging, media, config.PUBLIC_BASE_URL),
       nexusServices: [createMediaServiceHandler({ hopeEnabled: config.HOPE_ENABLED })],
       maxConcurrentActivityTaskExecutions: 4,
-    });
-    await worker.run();
-  } finally {
-    await connection.close();
-  }
+    }));
+    if (config.HOPE_API_URL) {
+      workers.push(await Worker.create({
+        connection,
+        namespace: config.TEMPORAL_NAMESPACE,
+        taskQueue: HOPE_TASK_QUEUE,
+        activities: createHopeProcessingActivities(
+          staging,
+          config.HOPE_API_URL,
+        ),
+        maxConcurrentActivityTaskExecutions: 1,
+        maxHeartbeatThrottleInterval: "5 seconds",
+        defaultHeartbeatThrottleInterval: "5 seconds",
+      }));
+    }
+  }, () => connection.close());
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

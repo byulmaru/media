@@ -80,6 +80,20 @@ describe("Temporal upload configuration", () => {
     }).success).toBe(false);
   });
 
+  it("enables the optional Hope poller with an HTTPS origin alone", () => {
+    expect(temporalUploadConfigSchema.safeParse({
+      ...config,
+      HOPE_API_URL: "https://mac.tailnet.example",
+    }).success).toBe(true);
+    for (const HOPE_API_URL of [
+      "http://mac.tailnet.example",
+      "https://mac.tailnet.example/protect",
+      " https://mac.tailnet.example ",
+    ]) {
+      expect(temporalUploadConfigSchema.safeParse({ ...config, HOPE_API_URL }).success).toBe(false);
+    }
+  });
+
   it.each([
     ["Temporal address", { TEMPORAL_ADDRESS: " " }],
     ["AWS access key", { AWS_ACCESS_KEY_ID: "" }],
