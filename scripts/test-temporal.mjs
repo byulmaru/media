@@ -582,8 +582,9 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert.equal(transparentPrepared.httpMetadata.contentType, "image/webp");
   const orientedThumbhash = decodeThumbhash(orientedPrepared.customMetadata?.thumbhash);
   const transparentThumbhash = decodeThumbhash(transparentPrepared.customMetadata?.thumbhash);
-  assert(Math.abs(thumbHashToApproximateAspectRatio(orientedThumbhash) - 0.5) < 0.1);
-  assert(Math.abs(thumbHashToApproximateAspectRatio(transparentThumbhash) - 2) < 0.1);
+  // ThumbHash quantizes the short edge to 7 steps for opaque images and 5 for alpha images.
+  assert.equal(thumbHashToApproximateAspectRatio(orientedThumbhash), 4 / 7);
+  assert.equal(thumbHashToApproximateAspectRatio(transparentThumbhash), 5 / 3);
   const transparentRgba = thumbHashToRGBA(transparentThumbhash).rgba;
   assert(transparentRgba.some(
     (value, index) => index % 4 === 3 && value < 255,
@@ -683,7 +684,7 @@ test("ThumbHash generation bounds large images while preserving their aspect rat
 
   await activities.prepareUploadImage(uploadInput(source.id, source.sourceKey));
   const hash = decodeThumbhash(staging.objects.get(preparedKey(source.sourceKey)).customMetadata?.thumbhash);
-  assert(Math.abs(thumbHashToApproximateAspectRatio(hash) - 2) < 0.1);
+  assert.equal(thumbHashToApproximateAspectRatio(hash), 7 / 4);
 });
 
 test("legacy image activity returns an existing public object without staged reads or writes", async () => {
