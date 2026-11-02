@@ -541,6 +541,14 @@ async function startPublishCaller(environment, endpoint, id, workflowId) {
   });
 }
 
+async function startMetadataCaller(environment, endpoint, id, workflowId, timeout = "25 hours") {
+  return environment.client.workflow.start("nexusGetUploadMetadataCallerWorkflow", {
+    workflowId,
+    taskQueue: TASK_QUEUE,
+    args: [endpoint, id, timeout],
+  });
+}
+
 async function awaitUploadWorkflowWaiting(environment, staging, id, sourceKey) {
   await waitFor(
     () => staging.lastModifiedReads.get(sourceKey) > 0,
@@ -552,6 +560,13 @@ async function awaitUploadWorkflowWaiting(environment, staging, id, sourceKey) {
     return history.events.some((event) => event.timerStartedEventAttributes);
   }, "upload workflow did not reach its durable publish wait");
   assert.equal(typeof staging.objects.get(preparedKey(sourceKey)).customMetadata?.thumbhash, "string");
+}
+
+async function awaitMetadataUpdateAccepted(environment, id) {
+  await waitFor(async () => {
+    const history = await environment.client.workflow.getHandle(`media-upload:${id}`).fetchHistory();
+    return history.events.some((event) => event.workflowExecutionUpdateAcceptedEventAttributes);
+  }, "metadata Update was not accepted");
 }
 
 function startedInput(history) {
@@ -622,7 +637,6 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   const orientedImage = media.objects.get(`original/${oriented.id}.webp`);
   assert(orientedImage);
   assert.deepEqual(orientedImage.bytes, orientedPrepared.bytes);
-  assert.equal(orientedImage.customMetadata?.thumbhash, orientedPrepared.customMetadata?.thumbhash);
   assert.equal(media.streamReads.get(`original/${oriented.id}.webp`), 1);
   assert.equal(media.streams.get(`original/${oriented.id}.webp`).destroyed, true);
   const orientedMetadata = await sharp(orientedImage.bytes).metadata();
@@ -635,7 +649,6 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   const transparentImage = media.objects.get(`original/${transparent.id}.webp`);
   assert(transparentImage);
   assert.deepEqual(transparentImage.bytes, transparentPrepared.bytes);
-  assert.equal(transparentImage.customMetadata?.thumbhash, transparentPrepared.customMetadata?.thumbhash);
   assert.equal(media.streamReads.get(`original/${transparent.id}.webp`), 1);
   assert.equal(media.streams.get(`original/${transparent.id}.webp`).destroyed, true);
   const decoded = await sharp(transparentImage.bytes)
@@ -669,7 +682,6 @@ test("legacy prepared WebP objects without ThumbHash are reused without backfill
   await activities.publishPreparedUpload(input);
   const published = media.objects.get(`original/${source.id}.webp`);
   assert.deepEqual(published.bytes, bytes);
-  assert.equal(published.customMetadata, undefined);
 });
 
 test("ThumbHash generation bounds large images while preserving their aspect ratio", async () => {
@@ -756,34 +768,6 @@ test("prepared publication retries a public write without rereading or reencodin
   assert.equal(media.streams.get(outputKey).destroyed, true);
   assert.equal(staging.contentReads.get(source.sourceKey), 1);
   assert.deepEqual(staging.putStreamKeys, [preparedObjectKey]);
-});
-
-test("Hope publication copies the original prepared ThumbHash to the public object", async () => {
-  const staging = new MemoryStagingStorage();
-  const media = new MemoryMediaStorage();
-  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
-  const source = newUpload();
-  const input = uploadInput(source.id, source.sourceKey);
-  const defaultPreparedKey = preparedKey(source.sourceKey);
-  staging.seed(source.sourceKey, PNG_RGBA_2X1);
-  await activities.prepareUploadImage(input);
-  const originalThumbhash = staging.objects.get(defaultPreparedKey).customMetadata?.thumbhash;
-  assert.equal(typeof originalThumbhash, "string");
-
-  const requestId = randomUUID();
-  const hopeKey = hopePreparedUploadKey(source.sourceKey, requestId);
-  const hopeBytes = Buffer.from("protected webp bytes");
-  staging.objects.set(hopeKey, {
-    bytes: hopeBytes,
-    lastModified: new Date(),
-    httpMetadata: { contentType: "image/webp" },
-    customMetadata: { thumbhash: "hope-variant-hash" },
-  });
-
-  await activities.publishPreparedUpload({ ...input, hopeRequestId: requestId });
-  const published = media.objects.get(`original/${source.id}.webp`);
-  assert.deepEqual(published.bytes, hopeBytes);
-  assert.equal(published.customMetadata?.thumbhash, originalThumbhash);
 });
 
 test("Temporal activity classifies native malformed decodes as non-retryable invalid_image without a public write", async () => {
@@ -873,6 +857,8 @@ test("markerless legacy history replays without preparing until publish is signa
   const staging = new MemoryStagingStorage();
   const media = new MemoryMediaStorage();
   const workerFailures = [];
+  const endpointName = `media-legacy-test-${randomUUID()}`;
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
   const source = newUpload();
   const input = uploadInput(source.id, source.sourceKey);
   staging.seed(source.sourceKey, PNG_1X1);
@@ -881,7 +867,7 @@ test("markerless legacy history replays without preparing until publish is signa
   try {
     worker = await startWorker(environment, legacyWorkflowBundle, staging, media, workerFailures);
     const handle = await environment.client.workflow.start("processUploadWorkflow", {
-      workflowId: `legacy-replay:${source.id}`,
+      workflowId: `media-upload:${source.id}`,
       taskQueue: TASK_QUEUE,
       args: [input],
     });
@@ -926,6 +912,20 @@ test("markerless legacy history replays without preparing until publish is signa
       trackedActivities,
     );
 
+    const metadataCaller = await startMetadataCaller(
+      environment,
+      endpointName,
+      source.id,
+      `legacy-metadata:${randomUUID()}`,
+      "60 seconds",
+    );
+    const metadataResult = await withTimeout(
+      metadataCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "markerless legacy workflow metadata did not return",
+    );
+    assert.deepEqual(metadataResult, { result: { id: source.id } });
+
     await handle.signal("publishUpload");
     const result = await withTimeout(handle.result(), WORKFLOW_TIMEOUT_MS, "legacy history did not replay and publish");
     const outputKey = `original/${source.id}.webp`;
@@ -940,6 +940,7 @@ test("markerless legacy history replays without preparing until publish is signa
     assert.deepEqual(workerFailures, []);
   } finally {
     if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
     await environment.teardown();
   }
 });
@@ -958,6 +959,8 @@ test("prepared-before-wait history replays with the Hope-aware workflow", async 
   const staging = new MemoryStagingStorage();
   const media = new MemoryMediaStorage();
   const workerFailures = [];
+  const endpointName = `media-prepared-legacy-test-${randomUUID()}`;
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
   const previousCalls = { prepare: 0 };
   const source = newUpload();
   const input = uploadInput(source.id, source.sourceKey);
@@ -978,12 +981,12 @@ test("prepared-before-wait history replays with the Hope-aware workflow", async 
         ...previousActivities,
         async prepareUploadImage(activityInput) {
           previousCalls.prepare += 1;
-          return previousActivities.prepareUploadImage(activityInput);
+          await previousActivities.prepareUploadImage(activityInput);
         },
       },
     );
     const handle = await environment.client.workflow.start("processUploadWorkflow", {
-      workflowId: `prepared-replay:${source.id}`,
+      workflowId: `media-upload:${source.id}`,
       taskQueue: TASK_QUEUE,
       args: [input],
     });
@@ -1027,6 +1030,20 @@ test("prepared-before-wait history replays with the Hope-aware workflow", async 
       },
     );
 
+    const metadataCaller = await startMetadataCaller(
+      environment,
+      endpointName,
+      source.id,
+      `prepared-legacy-metadata:${randomUUID()}`,
+      "60 seconds",
+    );
+    const metadataResult = await withTimeout(
+      metadataCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "void-history metadata did not return",
+    );
+    assert.deepEqual(metadataResult, { result: { id: source.id } });
+
     await handle.signal("publishUpload");
     const result = await withTimeout(
       handle.result(),
@@ -1043,6 +1060,7 @@ test("prepared-before-wait history replays with the Hope-aware workflow", async 
     assert.deepEqual(workerFailures, []);
   } finally {
     if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
     await environment.teardown();
   }
 });
@@ -1127,6 +1145,35 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.match(missingPublishResult.error, /upload workflow was not found/i);
     assert.equal(staging.lastModifiedReads.size, 0);
 
+    const invalidMetadataCaller = await startMetadataCaller(
+      environment,
+      endpointName,
+      "not-an-upload-id",
+      `metadata-invalid:${randomUUID()}`,
+      "3 seconds",
+    );
+    const invalidMetadataResult = await withTimeout(
+      invalidMetadataCaller.result(),
+      5_000,
+      "invalid metadata ID did not fail promptly",
+    );
+    assert.match(invalidMetadataResult.error, /upload ID is invalid/i);
+
+    const missingMetadataCaller = await startMetadataCaller(
+      environment,
+      endpointName,
+      newUpload().id,
+      `metadata-missing:${randomUUID()}`,
+      "3 seconds",
+    );
+    const missingMetadataResult = await withTimeout(
+      missingMetadataCaller.result(),
+      5_000,
+      "metadata lookup for a missing upload did not fail promptly",
+    );
+    assert.match(missingMetadataResult.error, /upload workflow was not found/i);
+    assert.equal(staging.lastModifiedReads.size, 0);
+
     const blocked = newUpload();
     const concurrent = newUpload();
     staging.seed(blocked.sourceKey, PNG_1X1);
@@ -1141,6 +1188,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       promise: blockedGet,
     };
     let blockedResultPromise;
+    let blockedMetadataPromise;
     let blockedCompleted = false;
     let blockedCaller;
     try {
@@ -1153,6 +1201,27 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       await withTimeout(blockedGetStarted, WORKFLOW_TIMEOUT_MS, "first upload did not start preparation");
       const blockedHistory = await environment.client.workflow.getHandle(`media-upload:${blocked.id}`).fetchHistory();
       assert.equal(blockedHistory.events.some((event) => event.timerStartedEventAttributes), false);
+      const blockedMetadataCaller = await startMetadataCaller(
+        environment,
+        endpointName,
+        blocked.id,
+        `metadata-blocked:${randomUUID()}`,
+      );
+      let blockedMetadataCompleted = false;
+      blockedMetadataPromise = blockedMetadataCaller.result().then((result) => {
+        blockedMetadataCompleted = true;
+        return result;
+      });
+      await awaitMetadataUpdateAccepted(environment, blocked.id);
+      const acceptedMetadataHistory = await environment.client.workflow.getHandle(
+        `media-upload:${blocked.id}`,
+      ).fetchHistory();
+      assert.equal(
+        acceptedMetadataHistory.events.some((event) => event.workflowExecutionUpdateCompletedEventAttributes),
+        false,
+        "metadata Update completed while preparation was blocked",
+      );
+      assert.equal(blockedMetadataCompleted, false, "metadata completed before image preparation");
       blockedResultPromise = blockedCaller.result().then((result) => {
         blockedCompleted = true;
         assert.equal(result.upload?.id, blocked.id);
@@ -1193,6 +1262,19 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       staging.getGate = undefined;
     }
     await awaitUploadWorkflowWaiting(environment, staging, blocked.id, blocked.sourceKey);
+    const blockedMetadataResult = await withTimeout(
+      blockedMetadataPromise,
+      WORKFLOW_TIMEOUT_MS,
+      "metadata Update did not finish after image preparation",
+    );
+    assert.deepEqual(blockedMetadataResult, {
+      result: {
+        id: blocked.id,
+        thumbhash: staging.objects.get(preparedKey(blocked.sourceKey)).customMetadata.thumbhash,
+      },
+    });
+    assert.equal(media.putCounts.get(`original/${blocked.id}.webp`) ?? 0, 0);
+    assert.equal(blockedCompleted, false);
     await blockedCaller.signal("finishNexusUploadTest");
     await withTimeout(
       blockedResultPromise,
@@ -1363,13 +1445,41 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     const badImage = newUpload();
     const badImageInput = uploadInput(badImage.id, badImage.sourceKey);
     staging.seed(badImage.sourceKey, Uint8Array.from([1, 2, 3, 4]));
+    const badImageGetStarted = deferred();
+    const badImageGet = deferred();
+    staging.getGate = {
+      key: badImage.sourceKey,
+      started: () => badImageGetStarted.resolve(),
+      promise: badImageGet.promise,
+    };
     const badImageCaller = await startCaller(
       environment,
       endpointName,
       badImageInput,
       `bad-image-caller:${randomUUID()}`,
     );
-    staging.failDeleteKey = preparedKey(badImage.sourceKey);
+    let badImageMetadataPromise;
+    try {
+      await withTimeout(badImageGetStarted.promise, WORKFLOW_TIMEOUT_MS, "invalid image did not start preparation");
+      const badImageMetadataCaller = await startMetadataCaller(
+        environment,
+        endpointName,
+        badImage.id,
+        `bad-image-metadata:${randomUUID()}`,
+      );
+      badImageMetadataPromise = badImageMetadataCaller.result();
+      await awaitMetadataUpdateAccepted(environment, badImage.id);
+      staging.failDeleteKey = preparedKey(badImage.sourceKey);
+    } finally {
+      badImageGet.resolve();
+      staging.getGate = undefined;
+    }
+    const badImageMetadataResult = await withTimeout(
+      badImageMetadataPromise,
+      WORKFLOW_TIMEOUT_MS,
+      "metadata operation did not fail after preparation failed",
+    );
+    assert.match(badImageMetadataResult.error, /UploadMetadataUnavailable/);
     const badImageResult = await withTimeout(
       badImageCaller.result(),
       WORKFLOW_TIMEOUT_MS,
@@ -1463,14 +1573,47 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
 
     const cancelled = newUpload();
     staging.seed(cancelled.sourceKey, PNG_1X1);
+    const cancelledGetStarted = deferred();
+    const cancelledGet = deferred();
+    staging.getGate = {
+      key: cancelled.sourceKey,
+      started: () => cancelledGetStarted.resolve(),
+      promise: cancelledGet.promise,
+    };
     const cancelledCaller = await startCaller(
       environment,
       endpointName,
       uploadInput(cancelled.id, cancelled.sourceKey),
       `cancelled-caller:${randomUUID()}`,
     );
-    await awaitUploadWorkflowWaiting(environment, staging, cancelled.id, cancelled.sourceKey);
-    await cancelledCaller.cancel();
+    let cancelledMetadataPromise;
+    let uploadCancellationPromise;
+    try {
+      await withTimeout(cancelledGetStarted.promise, WORKFLOW_TIMEOUT_MS, "cancelled upload did not start preparation");
+      const cancelledMetadataCaller = await startMetadataCaller(
+        environment,
+        endpointName,
+        cancelled.id,
+        `cancelled-metadata:${randomUUID()}`,
+      );
+      cancelledMetadataPromise = cancelledMetadataCaller.result();
+      await awaitMetadataUpdateAccepted(environment, cancelled.id);
+      uploadCancellationPromise = cancelledCaller.cancel();
+      await waitFor(async () => {
+        const history = await environment.client.workflow.getHandle(`media-upload:${cancelled.id}`).fetchHistory();
+        return history.events.some((event) => event.workflowExecutionCancelRequestedEventAttributes);
+      }, "upload cancellation was not requested before releasing preparation");
+    } finally {
+      cancelledGet.resolve();
+      staging.getGate = undefined;
+    }
+    await uploadCancellationPromise;
+    const cancelledMetadataResult = await withTimeout(
+      cancelledMetadataPromise,
+      WORKFLOW_TIMEOUT_MS,
+      "metadata operation did not finish after upload cancellation",
+    );
+    assert.match(cancelledMetadataResult.error, /UploadMetadataUnavailable/);
     await assert.rejects(
       withTimeout(
         cancelledCaller.result(),
@@ -1555,6 +1698,26 @@ test("Nexus applyHope waits for queued processing and publishes its private vari
     );
     await waitFor(() => staging.objects.has(defaultKey), "default private image was not prepared");
     const defaultBytes = Buffer.from(staging.objects.get(defaultKey).bytes);
+    const metadataCaller = await startMetadataCaller(
+      environment,
+      endpointName,
+      source.id,
+      `hope-metadata:${randomUUID()}`,
+      "60 seconds",
+    );
+    const metadataResult = await withTimeout(
+      metadataCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "original metadata did not return before Hope processing",
+    );
+    assert.deepEqual(metadataResult, {
+      result: {
+        id: source.id,
+        thumbhash: staging.objects.get(defaultKey).customMetadata.thumbhash,
+      },
+    });
+    assert.equal(media.objects.has(publicKey), false);
+    assert.equal(media.putCounts.get(publicKey) ?? 0, 0);
 
     const applyHopeCaller = await startApplyHopeCaller(
       environment,
@@ -1623,6 +1786,26 @@ test("Nexus applyHope waits for queued processing and publishes its private vari
       workerFailures,
     );
     await withTimeout(prepareStarted.promise, WORKFLOW_TIMEOUT_MS, "external activity did not start");
+
+    const metadataDuringHopeCaller = await startMetadataCaller(
+      environment,
+      endpointName,
+      source.id,
+      `hope-metadata-during-processing:${randomUUID()}`,
+      "60 seconds",
+    );
+    const metadataDuringHope = await withTimeout(
+      metadataDuringHopeCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "original metadata did not return while Hope processing was blocked",
+    );
+    assert.deepEqual(metadataDuringHope, metadataResult);
+    assert.equal((await Promise.race([
+      hopeOutcomePromise.then(() => true),
+      delay(0).then(() => false),
+    ])), false, "applyHope completed while its external worker was blocked");
+    assert.equal(media.objects.has(publicKey), false);
+    assert.equal(media.putCounts.get(publicKey) ?? 0, 0);
 
     const busyCaller = await startApplyHopeCaller(
       environment,

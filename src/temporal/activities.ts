@@ -384,7 +384,6 @@ export function createUploadProcessingActivities(
     };
     if (await media.head(outputKey)) return result;
 
-    const thumbhash = (await staging.head(preparedUploadKey(input.sourceKey)))?.customMetadata?.thumbhash;
     const prepared = await staging.getStream(stagingKey, "image/webp");
     if (!prepared) throw new Error("prepared upload object is missing");
     try {
@@ -398,7 +397,6 @@ export function createUploadProcessingActivities(
             contentType: "image/webp",
             cacheControl: IMMUTABLE_CACHE_CONTROL,
           },
-          ...(thumbhash === undefined ? {} : { customMetadata: { thumbhash } }),
         },
       );
       if (!stored && !(await media.head(outputKey))) {
@@ -422,12 +420,13 @@ export function createUploadProcessingActivities(
       return lastModified.getTime();
     },
 
-    async prepareUploadImage(rawInput: ProcessUploadInput): Promise<void> {
+    async prepareUploadImage(rawInput: ProcessUploadInput): Promise<string | undefined> {
       const input = parseProcessUploadInput(rawInput);
       if (!input) throw invalidProcessingInput();
-      if (await media.head(`original/${input.id}.webp`)) return;
+      const existing = await media.head(`original/${input.id}.webp`);
+      if (existing) return existing.customMetadata?.thumbhash;
       try {
-        await ensurePreparedUpload(staging, input);
+        return await ensurePreparedUpload(staging, input);
       } catch (error) {
         throw asNonRetryableValidationFailure(error) ?? error;
       }

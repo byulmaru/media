@@ -6,6 +6,7 @@ import {
   allHandlersFinished,
   condition,
   defineSignal,
+  defineUpdate,
   getExternalWorkflowHandle,
   log,
   patched,
@@ -24,18 +25,21 @@ import type {
   ApplyHopeWorkflowFailure,
   ApplyHopeWorkflowReply,
   HopeProcessingActivities,
+  UploadMetadataResult,
 } from "./types";
 import {
   HOPE_MAX_EDGE,
   HOPE_PROCESSING_ERROR_TYPE,
   HOPE_TASK_QUEUE,
   PUBLISH_UPLOAD_SIGNAL_NAME,
+  GET_UPLOAD_METADATA_UPDATE_NAME,
   APPLY_HOPE_REPLY_ERROR_TYPES,
   APPLY_HOPE_REQUEST_SIGNAL_NAME,
   APPLY_HOPE_RESULT_SIGNAL_NAME,
   UPLOAD_EXPIRED_ERROR_TYPE,
   UPLOAD_EXPIRATION_MS,
   UPLOAD_PROCESSING_INPUT_ERROR_TYPE,
+  UPLOAD_METADATA_UNAVAILABLE_ERROR_TYPE,
   UPLOAD_SOURCE_ERROR_TYPE,
   UPLOAD_VALIDATION_ERROR_TYPE,
 } from "./types";
@@ -48,6 +52,7 @@ import {
 } from "./validation";
 
 const publishUploadSignal = defineSignal(PUBLISH_UPLOAD_SIGNAL_NAME);
+const getUploadMetadataUpdate = defineUpdate<UploadMetadataResult, []>(GET_UPLOAD_METADATA_UPDATE_NAME);
 const applyHopeRequestSignal = defineSignal<[unknown]>(APPLY_HOPE_REQUEST_SIGNAL_NAME);
 const applyHopeResultSignal = defineSignal<[unknown]>(APPLY_HOPE_RESULT_SIGNAL_NAME);
 
@@ -236,6 +241,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
   let hopeCommandBusy = false;
   let hopeRequestsEnabled: boolean | undefined;
   let workflowEnding = false;
+  let preparedMetadata: UploadMetadataResult | undefined;
   let deadline: number | undefined;
   let pendingHopeCommand: HopeCommand | undefined;
   let selectedHopeRequestId: string | undefined;
@@ -245,6 +251,18 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
   try {
     setHandler(publishUploadSignal, () => {
       if (!hopeFailed || hopeCommandBusy) published = true;
+    });
+
+    setHandler(getUploadMetadataUpdate, async () => {
+      await CancellationScope.nonCancellable(() =>
+        condition(() => preparedMetadata !== undefined || workflowEnding),
+      );
+      if (preparedMetadata) return preparedMetadata;
+      throw ApplicationFailure.create({
+        message: "Upload metadata is unavailable",
+        type: UPLOAD_METADATA_UNAVAILABLE_ERROR_TYPE,
+        nonRetryable: true,
+      });
     });
 
     // Register before the first activity so an immediate Hope request can be buffered.
@@ -311,6 +329,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
     const usePreparedPublication = patched("prepare-private-webp-before-publish");
     const useHopeRequests = usePreparedPublication && patched("optional-hope-upload-v1");
     hopeRequestsEnabled = useHopeRequests;
+    if (!useHopeRequests) preparedMetadata = { id: validatedInput.id };
 
     if (!useHopeRequests && pendingHopeCommand) {
       const command = pendingHopeCommand;
@@ -324,7 +343,11 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
     }
 
     if (usePreparedPublication) {
-      await prepareUploadImage(validatedInput);
+      const thumbhash = await prepareUploadImage(validatedInput);
+      preparedMetadata = {
+        id: validatedInput.id,
+        ...(thumbhash ? { thumbhash } : {}),
+      };
       if (Date.now() >= deadline) throw uploadExpiredError();
     }
 

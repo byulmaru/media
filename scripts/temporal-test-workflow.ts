@@ -10,6 +10,7 @@ import type {
   ProcessUploadInput,
   ProcessUploadResult,
   ApplyHopeInput,
+  UploadMetadataResult,
 } from "../src/temporal/types";
 import { mediaService } from "../src/temporal/service";
 
@@ -133,6 +134,23 @@ export async function nexusPublishCallerWorkflow(endpoint: string, id: string) {
     return {
       result: await client.executeOperation("publishUpload", { id }, {
         scheduleToCloseTimeout: "3 seconds",
+      }),
+    };
+  } catch (error) {
+    return { error: errorMessage(error) };
+  }
+}
+
+export async function nexusGetUploadMetadataCallerWorkflow(
+  endpoint: string,
+  id: string,
+  scheduleToCloseTimeout = "25 hours",
+): Promise<{ result: UploadMetadataResult } | { error: string }> {
+  const client = createNexusServiceClient({ service: mediaService, endpoint });
+  try {
+    return {
+      result: await client.executeOperation("getUploadMetadata", { id }, {
+        scheduleToCloseTimeout,
       }),
     };
   } catch (error) {

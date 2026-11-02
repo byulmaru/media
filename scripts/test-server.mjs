@@ -383,15 +383,6 @@ test("built Node server stages raw uploads privately", async () => {
     assert(staged.uploaded instanceof Date);
     assert.equal(media.objects.has(`original/${ticket.id}.webp`), false);
 
-    const thumbhash = "AQIDBA==";
-    staging.objects.set(`${sourceKey}.webp`, {
-      bytes: Buffer.from("prepared webp"),
-      httpMetadata: { contentType: "image/webp" },
-      customMetadata: { thumbhash },
-      size: 13,
-      uploaded: new Date(),
-    });
-
     const status = await sendHttp(
       address.port,
       `/v1/uploads/${ticket.id}?staging=true`,
@@ -405,7 +396,6 @@ test("built Node server stages raw uploads privately", async () => {
     assert.equal(status.headers["content-length"], String(rawBytes.byteLength));
     assert.equal(status.headers["content-type"], "image/png");
     assert.equal(status.headers["last-modified"], staged.uploaded.toUTCString());
-    assert.equal(status.headers["x-thumbhash"], thumbhash);
     assert.equal(status.body.length, 0);
 
     const stagedGet = await sendHttp(address.port, `/v1/uploads/${ticket.id}?staging=true`, {
@@ -413,7 +403,6 @@ test("built Node server stages raw uploads privately", async () => {
     });
     assert.equal(stagedGet.statusCode, 405);
     assert.equal(stagedGet.headers.allow, "HEAD");
-    assert.equal(stagedGet.headers["x-thumbhash"], undefined);
     assert.equal(stagedGet.body.length, 0);
 
     const duplicate = await sendHttp(address.port, uploadPath, {

@@ -12,7 +12,6 @@ import {
 import { HttpError } from "../errors";
 import { validateImageUpload } from "../image-info";
 import { apiKeyAuth } from "../middleware/auth";
-import { preparedUploadKey } from "../prepared-upload";
 import { signUploadToken, verifyUploadToken } from "../token";
 import type { AppEnv } from "../types";
 import {
@@ -22,18 +21,6 @@ import {
 } from "../validation";
 
 const acceptedContentTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
-
-function thumbhashFrom(object: { customMetadata?: Record<string, string> } | null) {
-  const thumbhash = object?.customMetadata?.thumbhash;
-  if (!thumbhash) return undefined;
-  try {
-    new Headers({ "X-ThumbHash": thumbhash });
-    return thumbhash;
-  } catch {
-    // Omit unusable custom metadata rather than failing the metadata response.
-    return undefined;
-  }
-}
 
 export const uploads = new Hono<AppEnv>();
 
@@ -134,19 +121,8 @@ uploads.get(
         );
       }
 
-      const sourceKey = `uploads/${id}/${id.slice(2)}`;
-      const object = await c.env.STAGING.head(sourceKey);
+      const object = await c.env.STAGING.head(`uploads/${id}/${id.slice(2)}`);
       if (!object) return c.body(null, 404);
-
-      let thumbhash: string | undefined;
-      try {
-        thumbhash = thumbhashFrom(
-          await c.env.STAGING.head(preparedUploadKey(sourceKey)),
-        );
-      } catch {
-        // Hash is optional; preserve the existing source-metadata response on lookup failure.
-      }
-      if (thumbhash) c.header("X-ThumbHash", thumbhash);
 
       const size = object.size;
       if (size !== undefined && Number.isSafeInteger(size) && size >= 0) {
@@ -173,21 +149,13 @@ uploads.get(
     const object = await c.env.MEDIA.head(key);
     c.header("Cache-Control", "no-store");
     if (!object) return c.body(null, 404);
-    const thumbhash = thumbhashFrom(object);
-    if (c.req.method === "HEAD") {
-      if (thumbhash) c.header("X-ThumbHash", thumbhash);
-      return c.body(null, 204);
-    }
+    if (c.req.method === "HEAD") return c.body(null, 204);
 
     const mediaType = object.httpMetadata?.contentType;
     if (!mediaType) {
       throw new HttpError(500, "invalid_media_metadata", "stored media has no Content-Type");
     }
-    return c.json({
-      url: `${c.env.PUBLIC_BASE_URL}/${key}`,
-      mediaType,
-      ...(thumbhash ? { thumbhash } : {}),
-    });
+    return c.json({ url: `${c.env.PUBLIC_BASE_URL}/${key}`, mediaType });
   },
 );
 

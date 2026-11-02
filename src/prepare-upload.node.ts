@@ -10,11 +10,11 @@ type PreparedUploadStorage = Pick<UploadStagingStorage, "head" | "get" | "putStr
 export async function ensurePreparedUpload(
   storage: PreparedUploadStorage,
   input: ProcessUploadInput,
-): Promise<void> {
+): Promise<string | undefined> {
   const key = preparedUploadKey(input.sourceKey);
   const existing = await storage.head(key);
   if (existing) {
-    if (isPreparedUpload(existing)) return;
+    if (isPreparedUpload(existing)) return existing.customMetadata?.thumbhash;
     throw new Error("prepared upload metadata is invalid");
   }
 
@@ -61,9 +61,14 @@ export async function ensurePreparedUpload(
         customMetadata: { thumbhash: output.thumbhash },
       },
     );
-    if (!stored && !isPreparedUpload(await storage.head(key))) {
-      throw new Error("conditional prepared upload write could not be confirmed");
+    if (!stored) {
+      const winner = await storage.head(key);
+      if (!isPreparedUpload(winner)) {
+        throw new Error("conditional prepared upload write could not be confirmed");
+      }
+      return winner?.customMetadata?.thumbhash;
     }
+    return output.thumbhash;
   } finally {
     output.stream.destroy();
   }

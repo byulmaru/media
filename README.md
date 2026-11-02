@@ -75,6 +75,17 @@ export async function callerWorkflow(input: ProcessUploadInput) {
 
 호출 측은 사용자의 게시 요청을 workflow signal로 기록한 뒤 `publishUpload`를 실행합니다. 게시 대기 중 만료나 처리 실패가 먼저 발생할 수 있어 `startUpload` 결과와 signal을 함께 기다립니다. 호출 측 Workflow는 Nexus 취소 handler가 대상 `startUpload` 취소를 수락할 때까지 열려 있습니다. Raw source와 prepared WebP 정리는 비동기라 호출 측 종료 시 완료됐다고 보장되지 않습니다. `{ id }` acknowledgement는 게시 명령이 접수됐다는 뜻이며 이미지 공개 완료를 뜻하지 않습니다. 공개 저장이 끝난 `{ id, url, mediaType }` 결과를 사용하기 전에 `startUpload` operation의 `result()`를 기다립니다. 24시간 안에 게시하지 않거나 workflow가 취소되거나 처리가 최종 실패하면 Worker가 prepared WebP를 먼저 지우고 raw source를 정리합니다. Prepared WebP 삭제가 실패하면 raw source를 보존한 채 정리 Activity를 재시도하며, 재시도 후에도 실패하면 Worker는 업로드 ID를 포함해 경고를 남기고 48시간 lifecycle 만료에 맡깁니다. 정리 실패는 게시 결과를 덮어쓰거나 원래 Workflow 오류를 대체하지 않습니다. 게시 명령으로 처리가 시작된 뒤에는 취소나 회수 요청이 진행 중인 공개 저장을 막거나 이미 공개된 이미지를 되돌린다고 보장하지 않습니다.
 
+`startUpload` 뒤 caller는 Hope 선택 전에 준비 metadata를 기다릴 수 있습니다.
+
+```ts
+const metadata = await client.executeOperation("getUploadMetadata", { id: input.id }, {
+  scheduleToCloseTimeout: "25 hours",
+});
+// { id, thumbhash? } — original prepared WebP metadata, before or during Hope and before publication.
+```
+
+`getUploadMetadata`는 게시 전에 실행해야 합니다. 실행 중인 `media-upload:<id>` Workflow의 Update를 기다리며 게시를 시작하지 않으므로, Workflow가 끝난 뒤에는 `NOT_FOUND`를 반환합니다. 준비가 끝난 뒤에는 외부 Hope Activity가 처리 중이어도 원본의 준비 metadata를 반환합니다. `thumbhash`는 선택적인 base64 ThumbHash이며, legacy Workflow나 metadata가 없는 준비 객체는 `{ id }`를 반환합니다. 준비가 끝나기 전에 Workflow가 실패하면 operation은 `UploadMetadataUnavailable` 오류로 끝납니다.
+
 Worker는 Wrangler `MEDIA`와 `STAGING` R2 binding으로 저장하고 Node.js 서버는 R2 S3 API로 저장합니다. 두 런타임은 같은 object key, MIME type, metadata contract를 따르지만 upload path별 codec은 다릅니다. 점진적으로 전환할 때는 두 런타임의 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `ALLOWED_ORIGINS`, `PUBLIC_BASE_URL`을 맞추고, Node의 `R2_BUCKET_NAME`과 `R2_STAGING_BUCKET_NAME`은 Worker의 각 binding과 같은 bucket을 가리키도록 설정합니다. Worker의 `pnpm dev`, `pnpm deploy`, `pnpm dry-run` 명령은 계속 사용할 수 있습니다.
 
 Production API는 `media-api.byulmaru.co`에서 제공하며 Kubernetes ingress가 이 hostname을 처리합니다. Cloudflare Worker 코드와 배포는 남아 있지만, API route와 `workers.dev` endpoint는 비활성화합니다. 전환 뒤 최대 10분 동안 기존 Worker가 발급한 upload ticket이 Node.js 서버에서 실패할 수 있습니다.
@@ -85,7 +96,9 @@ Remote Media, thumbnail, Worker 이미지 조회 proxy와 KV는 v1 범위에 포
 
 ### 선택적 Hope 보호
 
-Media의 Nexus 계약은 새 upload Workflow에서만 비동기 `applyHope({ id, hope })` 요청을 받습니다. 기존 upload Workflow에는 적용되지 않으므로 Hope를 쓰려면 새 upload를 시작해야 합니다. `algorithm`은 `noise`, `glaze`, `nightshade` 중 하나이며 `iterations`는 각각 최대 500, 600, 750입니다. `intensity`는 선택 사항이며 기본값은 `0.3`입니다. `hope: null`은 Media Workflow 안에서 Hope 선택을 지우고 원본으로 준비한 기본 WebP를 선택합니다. 이 동작은 Hope Activity를 호출하지 않습니다. 호출자는 `applyHope` operation의 `result()`가 성공한 뒤 `publishUpload`를 호출해야 합니다. 실패한 Hope 요청 뒤에는 게시가 자동으로 진행되지 않으므로 보호 처리를 재시도하거나 `hope: null`로 초기화한 뒤 게시합니다. `applyHope` operation 취소는 요청과 결과 대기만 취소하며, 이미 수락된 처리 작업은 계속될 수 있습니다. 처리를 취소하고 Workflow cleanup을 시작하려면 원래 `startUpload` session을 취소해야 합니다.
+Media의 Nexus 계약은 새 upload Workflow에서 비동기 `getUploadMetadata({ id })`와 선택적 `applyHope({ id, hope })` 요청을 받습니다. `getUploadMetadata`는 Temporal TypeScript SDK 1.23의 실험적 Workflow Update Nexus 지원을 사용합니다. SDK에 기본 Update 취소 handler가 없으므로 이 operation의 Nexus 취소 요청은 `NOT_IMPLEMENTED`로 실패합니다.
+
+`applyHope`는 새 upload Workflow에서만 지원되므로 Hope를 쓰려면 새 upload를 시작해야 합니다. `algorithm`은 `noise`, `glaze`, `nightshade` 중 하나이며 `iterations`는 각각 최대 500, 600, 750입니다. `intensity`는 선택 사항이며 기본값은 `0.3`입니다. `hope: null`은 Media Workflow 안에서 Hope 선택을 지우고 원본으로 준비한 기본 WebP를 선택합니다. 이 동작은 Hope Activity를 호출하지 않습니다. 호출자는 `applyHope` operation의 `result()`가 성공한 뒤 `publishUpload`를 호출해야 합니다. 실패한 Hope 요청 뒤에는 게시가 자동으로 진행되지 않으므로 보호 처리를 재시도하거나 `hope: null`로 초기화한 뒤 게시합니다. `applyHope` operation 취소는 요청과 결과 대기만 취소하며, 이미 수락된 처리 작업은 계속될 수 있습니다. 처리를 취소하고 Workflow cleanup을 시작하려면 원래 `startUpload` session을 취소해야 합니다.
 
 Media가 정의한 Activity 계약은 `prepareHopeUpload(input): Promise<void>`이며, `id`, immutable raw source의 `sourceKey`, `contentType`, `maxBytes`, `maxDimension`, `requestId`, 정규화된 `hope` 옵션, `maxEdge: 1024`를 받습니다. Temporal에는 이미지 payload를 넣지 않고 private R2 객체 참조만 전달합니다. Media Worker가 R2에서 제한된 크기의 원본을 읽고 검증한 뒤 Hope HTTP API에 이미지 bytes와 옵션을 보냅니다. API는 추론한 WebP와 크기·모델 호출 metadata만 반환하며, Media가 응답을 검증해 private staging의 `${sourceKey}.hope/${requestId}.webp`에 조건부 저장합니다. Mac mini의 `hope-re`는 추론 API만 실행하며 R2나 Temporal credentials를 받지 않습니다. 실패는 generic `HopeProcessingError`로 전달합니다. caller는 성공 응답을 받은 뒤 별도로 게시를 요청하며, Media는 선택한 WebP를 공개 bucket으로 승격합니다.
 
@@ -257,8 +270,6 @@ Authorization: Bearer <API_KEY>
 
 성공 응답은 `Cache-Control: no-store`를 사용하고, 저장된 object에서 사용할 수 있는 `Content-Length`, `Content-Type`, `Last-Modified`만 보냅니다. metadata가 없거나 유효하지 않은 값이면 해당 헤더를 생략합니다. Kosmo는 필수 metadata가 없는 응답을 terminal validation error로 처리합니다.
 
-새 Workflow는 Hope 처리 선택 전에 원본으로 만든 기본 prepared WebP를 준비합니다. 준비된 객체에 `customMetadata.thumbhash`가 있으면 같은 인증된 staging `HEAD` 응답에 base64 `X-ThumbHash` 헤더를 추가합니다. 이 값은 게시 대기 중 사용할 원본의 미리보기 hash이며 Hope 보호 결과의 hash가 아닙니다. 준비가 끝나기 전이거나 legacy Workflow처럼 hash가 없는 객체에는 헤더를 보내지 않습니다. hash의 유무는 별도 Workflow 상태를 나타내지 않으며, 이를 조회할 새 endpoint나 API가 정한 polling interval은 없습니다.
-
 ### Check upload completion and resolve its representation
 
 Kosmo backend는 실제 소비 시점에 이미지 본문이나 공개 CDN을 거치지 않고 저장 완료를 확인합니다.
@@ -289,8 +300,6 @@ Authorization: Bearer <API_KEY>
   "mediaType": "image/webp"
 }
 ```
-
-저장 객체에 ThumbHash metadata가 있으면 인증된 `GET` 응답에 base64 `thumbhash` 필드를 추가하고, 같은 ID의 `HEAD` 응답에는 `X-ThumbHash` 헤더를 추가합니다. 필드와 헤더는 선택 사항이며, 준비 전이거나 ThumbHash가 없는 legacy/v1 객체의 기존 응답 shape는 그대로 유지됩니다. 값은 Hope 처리 선택 전 원본으로 만든 기본 WebP의 hash입니다.
 
 - immutable 원본이 저장됨: `200 OK`
 - 아직 저장되지 않음: `404 Not Found`
