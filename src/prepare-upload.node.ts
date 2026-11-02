@@ -10,6 +10,7 @@ type PreparedUploadStorage = Pick<UploadStagingStorage, "head" | "get" | "putStr
 export async function ensurePreparedUpload(
   storage: PreparedUploadStorage,
   input: ProcessUploadInput,
+  sourceBytes?: ArrayBuffer,
 ): Promise<string | undefined> {
   const key = preparedUploadKey(input.sourceKey);
   const existing = await storage.head(key);
@@ -18,14 +19,16 @@ export async function ensurePreparedUpload(
     throw new Error("prepared upload metadata is invalid");
   }
 
-  let bytes: ArrayBuffer;
-  try {
-    bytes = await storage.get(input.sourceKey, input.maxBytes);
-  } catch (error) {
-    if (error instanceof RangeError) {
-      throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
+  let bytes = sourceBytes;
+  if (bytes === undefined) {
+    try {
+      bytes = await storage.get(input.sourceKey, input.maxBytes);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
+      }
+      throw error;
     }
-    throw error;
   }
   if (bytes.byteLength > input.maxBytes) {
     throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");

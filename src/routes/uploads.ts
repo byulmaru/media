@@ -190,7 +190,17 @@ uploads.put("/:token", async (c) => {
       httpMetadata: { contentType },
     });
     if (!stored) throw new HttpError(409, "already_uploaded", "upload URL has already been used");
-    return c.json({ id: payload.id }, 201);
+    const thumbhash = await c.env.PREPARE_UPLOAD?.(
+      {
+        id: payload.id,
+        sourceKey,
+        contentType,
+        maxBytes: payload.maxBytes,
+        maxDimension: payload.maxDimension,
+      },
+      input,
+    );
+    return c.json(thumbhash ? { id: payload.id, thumbhash } : { id: payload.id }, 201);
   }
 
   const info = validateImageUpload(input, contentType, payload);

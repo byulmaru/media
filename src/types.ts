@@ -1,8 +1,13 @@
 import type { MediaStorage } from "./storage";
+import type { ProcessUploadInput } from "./temporal/types";
 
 export interface Env {
   MEDIA: MediaStorage;
   STAGING?: MediaStorage;
+  PREPARE_UPLOAD?: (
+    input: ProcessUploadInput,
+    bytes: ArrayBuffer,
+  ) => Promise<string | undefined>;
   API_KEY: string;
   UPLOAD_SIGNING_SECRET: string;
   ALLOWED_ORIGINS: string;

@@ -5,12 +5,17 @@ import { fileURLToPath } from "node:url";
 import { app } from "./app";
 import { initializeNodeCodec } from "./codec.node";
 import { assertConfig } from "./middleware/config";
+import { ensurePreparedUpload } from "./prepare-upload.node";
 import { createR2S3MediaStorage } from "./storage/r2-s3";
+import { createR2S3StagingStorage } from "./storage/staging";
 import type { MediaStorage } from "./storage";
+import type { UploadStagingStorage } from "./storage/staging";
 import type { Env } from "./types";
 import { nodeServerConfigSchema } from "./validation";
 
 export { R2S3MediaStorage } from "./storage/r2-s3";
+
+type NodeStagingStorage = MediaStorage & Pick<UploadStagingStorage, "get" | "putStream">;
 
 function readNodeConfig(source: NodeJS.ProcessEnv) {
   const result = nodeServerConfigSchema.safeParse(source);
@@ -32,7 +37,7 @@ function readNodeConfig(source: NodeJS.ProcessEnv) {
 export async function startServer(
   source: NodeJS.ProcessEnv = process.env,
   mediaStorage?: MediaStorage,
-  stagingStorage?: MediaStorage,
+  stagingStorage?: NodeStagingStorage,
 ): Promise<ReturnType<typeof serve>> {
   const {
     PORT: port,
@@ -57,7 +62,7 @@ export async function startServer(
       secretAccessKey,
     });
   const staging = stagingStorage ??
-    createR2S3MediaStorage({
+    createR2S3StagingStorage({
       endpoint: r2Endpoint,
       bucketName: stagingBucketName,
       accessKeyId,
@@ -66,6 +71,7 @@ export async function startServer(
   const bindings: Env = {
     MEDIA: media,
     STAGING: staging,
+    PREPARE_UPLOAD: (input, bytes) => ensurePreparedUpload(staging, input, bytes),
     API_KEY: apiKey,
     UPLOAD_SIGNING_SECRET: signingSecret,
     ALLOWED_ORIGINS: allowedOrigins,

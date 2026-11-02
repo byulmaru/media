@@ -420,13 +420,12 @@ export function createUploadProcessingActivities(
       return lastModified.getTime();
     },
 
-    async prepareUploadImage(rawInput: ProcessUploadInput): Promise<string | undefined> {
+    async prepareUploadImage(rawInput: ProcessUploadInput): Promise<void> {
       const input = parseProcessUploadInput(rawInput);
       if (!input) throw invalidProcessingInput();
-      const existing = await media.head(`original/${input.id}.webp`);
-      if (existing) return existing.customMetadata?.thumbhash;
+      if (await media.head(`original/${input.id}.webp`)) return;
       try {
-        return await ensurePreparedUpload(staging, input);
+        await ensurePreparedUpload(staging, input);
       } catch (error) {
         throw asNonRetryableValidationFailure(error) ?? error;
       }

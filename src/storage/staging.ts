@@ -41,6 +41,14 @@ export class R2S3StagingStorage implements UploadStagingStorage {
     return this.media.head(key);
   }
 
+  put(
+    key: string,
+    value: ArrayBuffer,
+    options: MediaPutOptions,
+  ): Promise<MediaObject | null> {
+    return this.media.put(key, value, options);
+  }
+
   async headLastModified(key: string): Promise<Date | null> {
     try {
       const object = await this.client.send(

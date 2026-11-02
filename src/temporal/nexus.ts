@@ -2,7 +2,6 @@ import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from "@te
 import {
   getClient,
   startWorkflow,
-  TemporalOperationHandler,
   WorkflowRunOperationHandler,
 } from "@temporalio/nexus";
 import { HandlerError, serviceHandler } from "nexus-rpc";
@@ -12,7 +11,6 @@ import {
   HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH,
   PROCESS_UPLOAD_WORKFLOW_TYPE,
   PUBLISH_UPLOAD_SIGNAL_NAME,
-  GET_UPLOAD_METADATA_UPDATE_NAME,
   APPLY_HOPE_WORKFLOW_ID_PREFIX,
   APPLY_HOPE_WORKFLOW_TYPE,
 } from "./types";
@@ -22,8 +20,6 @@ import type {
   PublishUploadResult,
   ApplyHopeInput,
   ApplyHopeResult,
-  PublishUploadInput,
-  UploadMetadataResult,
 } from "./types";
 import { parseProcessUploadInput, parsePublishUploadInput, parseApplyHopeInput } from "./validation";
 import { mediaService, mediaServiceWithoutHope } from "./service";
@@ -85,30 +81,6 @@ async function publishUpload(_ctx: unknown, rawInput: unknown): Promise<PublishU
   return { id: input.id };
 }
 
-const getUploadMetadataHandler = new TemporalOperationHandler<PublishUploadInput, UploadMetadataResult>({
-  start: async (_ctx, client, rawInput) => {
-    const input = parsePublishUploadInput(rawInput);
-    if (!input) {
-      throw new HandlerError("BAD_REQUEST", "upload ID is invalid", {
-        retryableOverride: false,
-      });
-    }
-
-    try {
-      return await client.getWorkflowHandle(`media-upload:${input.id}`)
-        .update<UploadMetadataResult, []>(GET_UPLOAD_METADATA_UPDATE_NAME);
-    } catch (error) {
-      if (error instanceof WorkflowNotFoundError) {
-        throw new HandlerError("NOT_FOUND", "upload workflow was not found", {
-          cause: error,
-          retryableOverride: false,
-        });
-      }
-      throw error;
-    }
-  },
-});
-
 const applyHopeHandler = new WorkflowRunOperationHandler<ApplyHopeInput, ApplyHopeResult>(
   async (ctx, rawInput) => {
     const input = parseApplyHopeInput(rawInput);
@@ -146,14 +118,12 @@ export function createMediaServiceHandler(options: { hopeEnabled?: boolean } = {
   if (options.hopeEnabled) {
     return serviceHandler(mediaService, {
       startUpload: startUploadHandler,
-      getUploadMetadata: getUploadMetadataHandler,
       publishUpload,
       applyHope: applyHopeHandler,
     });
   }
   return serviceHandler(mediaServiceWithoutHope, {
     startUpload: startUploadHandler,
-    getUploadMetadata: getUploadMetadataHandler,
     publishUpload,
   });
 }

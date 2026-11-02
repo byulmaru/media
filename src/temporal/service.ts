@@ -5,14 +5,12 @@ import type {
   ProcessUploadResult,
   ApplyHopeInput,
   ApplyHopeResult,
-  UploadMetadataResult,
   PublishUploadInput,
   PublishUploadResult,
 } from "./types";
 
 const uploadOperations = {
   startUpload: operation<ProcessUploadInput, ProcessUploadResult>(),
-  getUploadMetadata: operation<PublishUploadInput, UploadMetadataResult>(),
   publishUpload: operation<PublishUploadInput, PublishUploadResult>(),
 };
 
