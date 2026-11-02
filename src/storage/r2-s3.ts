@@ -29,6 +29,7 @@ export class R2S3MediaStorage implements MediaStorage {
       );
       return {
         httpMetadata: { contentType: object.ContentType },
+        customMetadata: object.Metadata,
         size: object.ContentLength,
         uploaded: object.LastModified,
       };
@@ -78,6 +79,7 @@ export class R2S3MediaStorage implements MediaStorage {
           IfNoneMatch: ifNoneMatch,
           ContentType: options.httpMetadata.contentType,
           CacheControl: options.httpMetadata.cacheControl,
+          Metadata: options.customMetadata,
         }),
       );
       return {};

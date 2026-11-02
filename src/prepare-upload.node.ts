@@ -58,6 +58,7 @@ export async function ensurePreparedUpload(
       {
         onlyIf: new Headers({ "If-None-Match": "*" }),
         httpMetadata: { contentType: "image/webp" },
+        customMetadata: { thumbhash: output.thumbhash },
       },
     );
     if (!stored && !isPreparedUpload(await storage.head(key))) {

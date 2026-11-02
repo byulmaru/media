@@ -30,6 +30,7 @@ const putOptions = {
     contentType: "image/webp",
     cacheControl: "public, max-age=2592000, immutable",
   },
+  customMetadata: { thumbhash: "AQIDBA==" },
 };
 
 function s3Failure(status) {
@@ -105,6 +106,7 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
           ContentLength: 123,
           ContentType: "image/webp",
           LastModified: new Date("2026-10-21T00:00:00.000Z"),
+          Metadata: { thumbhash: "AQIDBA==" },
         };
       },
     },
@@ -112,6 +114,7 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
   );
   assert.deepEqual(await headStorage.head("original/u_existing.webp"), {
     httpMetadata: { contentType: "image/webp" },
+    customMetadata: { thumbhash: "AQIDBA==" },
     size: 123,
     uploaded: new Date("2026-10-21T00:00:00.000Z"),
   });
@@ -160,7 +163,7 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
   assert.equal(commands[0].input.IfNoneMatch, "*");
   assert.equal(commands[0].input.ContentType, "image/webp");
   assert.equal(commands[0].input.CacheControl, putOptions.httpMetadata.cacheControl);
-  assert.equal(commands[0].input.Metadata, undefined);
+  assert.deepEqual(commands[0].input.Metadata, putOptions.customMetadata);
 
   const conflictStorage = new R2S3MediaStorage(
     { async send() { throw s3Failure(412); } },
@@ -196,6 +199,7 @@ class MemoryMediaStorage {
     const object = this.objects.get(key);
     return object ? {
       httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
       size: object.size,
       uploaded: object.uploaded,
     } : null;
@@ -207,6 +211,7 @@ class MemoryMediaStorage {
     this.objects.set(key, {
       bytes: Buffer.from(value),
       httpMetadata: options.httpMetadata,
+      customMetadata: options.customMetadata,
       size: value.byteLength,
       uploaded: new Date(),
     });
@@ -378,6 +383,15 @@ test("built Node server stages raw uploads privately", async () => {
     assert(staged.uploaded instanceof Date);
     assert.equal(media.objects.has(`original/${ticket.id}.webp`), false);
 
+    const thumbhash = "AQIDBA==";
+    staging.objects.set(`${sourceKey}.webp`, {
+      bytes: Buffer.from("prepared webp"),
+      httpMetadata: { contentType: "image/webp" },
+      customMetadata: { thumbhash },
+      size: 13,
+      uploaded: new Date(),
+    });
+
     const status = await sendHttp(
       address.port,
       `/v1/uploads/${ticket.id}?staging=true`,
@@ -391,6 +405,7 @@ test("built Node server stages raw uploads privately", async () => {
     assert.equal(status.headers["content-length"], String(rawBytes.byteLength));
     assert.equal(status.headers["content-type"], "image/png");
     assert.equal(status.headers["last-modified"], staged.uploaded.toUTCString());
+    assert.equal(status.headers["x-thumbhash"], thumbhash);
     assert.equal(status.body.length, 0);
 
     const stagedGet = await sendHttp(address.port, `/v1/uploads/${ticket.id}?staging=true`, {
@@ -398,6 +413,7 @@ test("built Node server stages raw uploads privately", async () => {
     });
     assert.equal(stagedGet.statusCode, 405);
     assert.equal(stagedGet.headers.allow, "HEAD");
+    assert.equal(stagedGet.headers["x-thumbhash"], undefined);
     assert.equal(stagedGet.body.length, 0);
 
     const duplicate = await sendHttp(address.port, uploadPath, {

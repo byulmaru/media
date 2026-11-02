@@ -257,6 +257,8 @@ Authorization: Bearer <API_KEY>
 
 성공 응답은 `Cache-Control: no-store`를 사용하고, 저장된 object에서 사용할 수 있는 `Content-Length`, `Content-Type`, `Last-Modified`만 보냅니다. metadata가 없거나 유효하지 않은 값이면 해당 헤더를 생략합니다. Kosmo는 필수 metadata가 없는 응답을 terminal validation error로 처리합니다.
 
+새 Workflow는 Hope 처리 선택 전에 원본으로 만든 기본 prepared WebP를 준비합니다. 준비된 객체에 `customMetadata.thumbhash`가 있으면 같은 인증된 staging `HEAD` 응답에 base64 `X-ThumbHash` 헤더를 추가합니다. 이 값은 게시 대기 중 사용할 원본의 미리보기 hash이며 Hope 보호 결과의 hash가 아닙니다. 준비가 끝나기 전이거나 legacy Workflow처럼 hash가 없는 객체에는 헤더를 보내지 않습니다. hash의 유무는 별도 Workflow 상태를 나타내지 않으며, 이를 조회할 새 endpoint나 API가 정한 polling interval은 없습니다.
+
 ### Check upload completion and resolve its representation
 
 Kosmo backend는 실제 소비 시점에 이미지 본문이나 공개 CDN을 거치지 않고 저장 완료를 확인합니다.
@@ -287,6 +289,8 @@ Authorization: Bearer <API_KEY>
   "mediaType": "image/webp"
 }
 ```
+
+저장 객체에 ThumbHash metadata가 있으면 인증된 `GET` 응답에 base64 `thumbhash` 필드를 추가하고, 같은 ID의 `HEAD` 응답에는 `X-ThumbHash` 헤더를 추가합니다. 필드와 헤더는 선택 사항이며, 준비 전이거나 ThumbHash가 없는 legacy/v1 객체의 기존 응답 shape는 그대로 유지됩니다. 값은 Hope 처리 선택 전 원본으로 만든 기본 WebP의 hash입니다.
 
 - immutable 원본이 저장됨: `200 OK`
 - 아직 저장되지 않음: `404 Not Found`

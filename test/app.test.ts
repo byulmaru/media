@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import webpDecodeWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
 
 import { app } from "../src/app";
+import { preparedUploadKey } from "../src/prepared-upload";
 import type { MediaObject, MediaStorage } from "../src/storage";
 import { inspectImage } from "../src/image-info";
 import type { Env } from "../src/types";
@@ -201,13 +202,20 @@ describe("media API", () => {
 
   it("authenticates staging metadata reads and omits unusable stored metadata", async () => {
     const id = "u_00000000-0000-4000-8000-000000000000";
+    const sourceKey = `uploads/${id}/${id.slice(2)}`;
+    const preparedKey = preparedUploadKey(sourceKey);
     const lookups: string[] = [];
     let stored: MediaObject | null = { httpMetadata: { contentType: "image/png" } };
+    let preparedFailure: Error | null = null;
     let storageFailure: Error | null = null;
     const storage: MediaStorage = {
       async head(key) {
         lookups.push(key);
         if (storageFailure) throw storageFailure;
+        if (key === preparedKey) {
+          if (preparedFailure) throw preparedFailure;
+          return null;
+        }
         return stored;
       },
       async put() {
@@ -238,7 +246,10 @@ describe("media API", () => {
     expect(incomplete.headers.get("Content-Type")).toBe("image/png");
     expect(incomplete.headers.get("Content-Length")).toBeNull();
     expect(incomplete.headers.get("Last-Modified")).toBeNull();
+    expect(incomplete.headers.get("X-ThumbHash")).toBeNull();
     expect(await incomplete.text()).toBe("");
+    expect(lookups).toEqual([sourceKey, preparedKey]);
+    lookups.length = 0;
 
     stored = {
       size: -1,
@@ -250,23 +261,183 @@ describe("media API", () => {
     expect(unusable.headers.get("Content-Length")).toBeNull();
     expect(unusable.headers.get("Last-Modified")).toBeNull();
     expect(unusable.headers.get("Content-Type")).toBeNull();
+    expect(unusable.headers.get("X-ThumbHash")).toBeNull();
     expect(await unusable.text()).toBe("");
+    expect(lookups).toEqual([sourceKey, preparedKey]);
+    lookups.length = 0;
 
     const get = await app.request(url, { headers: authHeaders }, bindings);
     expect(get.status).toBe(405);
     expect(get.headers.get("Allow")).toBe("HEAD");
+    expect(get.headers.get("X-ThumbHash")).toBeNull();
     expect(await get.text()).toBe("");
+    expect(lookups).toEqual([]);
+
+    const sourceUploaded = new Date("2026-11-02T00:00:00.000Z");
+    stored = {
+      size: 11,
+      uploaded: sourceUploaded,
+      httpMetadata: { contentType: "image/png" },
+    };
+    preparedFailure = new Error("prepared object unavailable");
+    const preparedUnavailable = await app.request(url, { method: "HEAD", headers: authHeaders }, bindings);
+    expect(preparedUnavailable.status).toBe(200);
+    expect(preparedUnavailable.headers.get("Content-Type")).toBe("image/png");
+    expect(preparedUnavailable.headers.get("Content-Length")).toBe("11");
+    expect(preparedUnavailable.headers.get("Last-Modified")).toBe(sourceUploaded.toUTCString());
+    expect(preparedUnavailable.headers.get("X-ThumbHash")).toBeNull();
+    expect(await preparedUnavailable.text()).toBe("");
+    expect(lookups).toEqual([sourceKey, preparedKey]);
+    preparedFailure = null;
+    lookups.length = 0;
 
     storageFailure = new Error("R2 unavailable");
     const failed = await app.request(url, { method: "HEAD", headers: authHeaders }, bindings);
     expect(failed.status).toBe(500);
     expect(failed.headers.get("Cache-Control")).toBe("no-store");
     expect(await failed.text()).toBe("");
-    expect(lookups).toEqual([
-      `uploads/${id}/${id.slice(2)}`,
-      `uploads/${id}/${id.slice(2)}`,
-      `uploads/${id}/${id.slice(2)}`,
-    ]);
+    expect(lookups).toEqual([sourceKey]);
+  });
+
+  it("returns the default prepared ThumbHash while staging remains unpublished", async () => {
+    const id = "u_00000000-0000-4000-8000-000000000000";
+    const sourceKey = `uploads/${id}/${id.slice(2)}`;
+    const thumbhash = "AQIDBA==";
+    const source: MediaObject = {
+      size: 11,
+      uploaded: new Date("2026-11-02T00:00:00.000Z"),
+      httpMetadata: { contentType: "image/png" },
+    };
+    const lookups: string[] = [];
+    const mediaLookups: string[] = [];
+    const staging: MediaStorage = {
+      async head(key) {
+        lookups.push(key);
+        if (key === sourceKey) return source;
+        if (key === preparedUploadKey(sourceKey)) {
+          return { customMetadata: { thumbhash } };
+        }
+        return null;
+      },
+      async put() {
+        throw new Error("metadata reads do not write");
+      },
+    };
+    const media: MediaStorage = {
+      async head(key) {
+        mediaLookups.push(key);
+        return null;
+      },
+      async put() {
+        throw new Error("metadata reads do not write");
+      },
+    };
+    const bindings: Env = {
+      MEDIA: media,
+      STAGING: staging,
+      API_KEY: "test-api-key",
+      UPLOAD_SIGNING_SECRET: "test-signing-secret-at-least-32-bytes",
+      ALLOWED_ORIGINS: "https://app.example.com",
+      PUBLIC_BASE_URL: "https://media.byulma.run",
+    };
+    const stagingUrl = `https://media.example.com/v1/uploads/${id}?staging=true`;
+
+    const unauthorized = await app.request(stagingUrl, { method: "HEAD" }, bindings);
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("X-ThumbHash")).toBeNull();
+    expect(lookups).toEqual([]);
+
+    const status = await app.request(stagingUrl, { method: "HEAD", headers: authHeaders }, bindings);
+    expect(status.status).toBe(200);
+    expect(status.headers.get("Cache-Control")).toBe("no-store");
+    expect(status.headers.get("Content-Length")).toBe("11");
+    expect(status.headers.get("Content-Type")).toBe("image/png");
+    expect(status.headers.get("Last-Modified")).toBe(source.uploaded!.toUTCString());
+    expect(status.headers.get("X-ThumbHash")).toBe(thumbhash);
+    expect(await status.text()).toBe("");
+    expect(lookups).toEqual([sourceKey, preparedUploadKey(sourceKey)]);
+
+    lookups.length = 0;
+    const stagedGet = await app.request(stagingUrl, { headers: authHeaders }, bindings);
+    expect(stagedGet.status).toBe(405);
+    expect(stagedGet.headers.get("Allow")).toBe("HEAD");
+    expect(stagedGet.headers.get("X-ThumbHash")).toBeNull();
+    expect(await stagedGet.text()).toBe("");
+    expect(lookups).toEqual([]);
+
+    const unpublished = await app.request(
+      `https://media.example.com/v1/uploads/${id}`,
+      { headers: authHeaders },
+      bindings,
+    );
+    expect(unpublished.status).toBe(404);
+    expect(unpublished.headers.get("X-ThumbHash")).toBeNull();
+    expect(mediaLookups).toEqual([`original/${id}.webp`]);
+    expect(source).toEqual({
+      size: 11,
+      uploaded: new Date("2026-11-02T00:00:00.000Z"),
+      httpMetadata: { contentType: "image/png" },
+    });
+  });
+
+  it("returns published ThumbHash in HEAD and GET while preserving legacy responses", async () => {
+    const id = "u_00000000-0000-4000-8000-000000000000";
+    const thumbhash = "AQIDBA==";
+    let published: MediaObject | null = {
+      httpMetadata: { contentType: "image/webp" },
+      customMetadata: { thumbhash },
+    };
+    const lookups: string[] = [];
+    const media: MediaStorage = {
+      async head(key) {
+        lookups.push(key);
+        return published;
+      },
+      async put() {
+        throw new Error("metadata reads do not write");
+      },
+    };
+    const bindings: Env = {
+      MEDIA: media,
+      API_KEY: "test-api-key",
+      UPLOAD_SIGNING_SECRET: "test-signing-secret-at-least-32-bytes",
+      ALLOWED_ORIGINS: "https://app.example.com",
+      PUBLIC_BASE_URL: "https://media.byulma.run",
+    };
+    const url = `https://media.example.com/v1/uploads/${id}`;
+
+    const unauthorized = await app.request(url, { method: "HEAD" }, bindings);
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("X-ThumbHash")).toBeNull();
+    expect(lookups).toEqual([]);
+
+    const head = await app.request(url, { method: "HEAD", headers: authHeaders }, bindings);
+    expect(head.status).toBe(204);
+    expect(head.headers.get("Cache-Control")).toBe("no-store");
+    expect(head.headers.get("X-ThumbHash")).toBe(thumbhash);
+    expect(await head.text()).toBe("");
+
+    const response = await app.request(url, { headers: authHeaders }, bindings);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(response.headers.get("X-ThumbHash")).toBeNull();
+    await expect(response.json()).resolves.toEqual({
+      url: `https://media.byulma.run/original/${id}.webp`,
+      mediaType: "image/webp",
+      thumbhash,
+    });
+
+    published = { httpMetadata: { contentType: "image/webp" } };
+    const legacyHead = await app.request(url, { method: "HEAD", headers: authHeaders }, bindings);
+    expect(legacyHead.status).toBe(204);
+    expect(legacyHead.headers.get("X-ThumbHash")).toBeNull();
+
+    const legacyResponse = await app.request(url, { headers: authHeaders }, bindings);
+    expect(legacyResponse.status).toBe(200);
+    await expect(legacyResponse.json()).resolves.toEqual({
+      url: `https://media.byulma.run/original/${id}.webp`,
+      mediaType: "image/webp",
+    });
   });
 
   it("allows only one winner for concurrent staged uploads", async () => {

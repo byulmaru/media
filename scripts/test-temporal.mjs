@@ -5,6 +5,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import sharp from "sharp";
+import {
+  thumbHashToApproximateAspectRatio,
+  thumbHashToAverageRGBA,
+  thumbHashToRGBA,
+} from "thumbhash";
 
 import {
   GetObjectCommand,
@@ -177,6 +182,7 @@ class MemoryStagingStorage {
     const object = this.objects.get(key);
     return object ? {
       httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
       size: object.bytes.byteLength,
       uploaded: object.lastModified,
     } : null;
@@ -216,6 +222,7 @@ class MemoryStagingStorage {
       bytes,
       lastModified: new Date(),
       httpMetadata: options.httpMetadata,
+      customMetadata: options.customMetadata,
     });
     return {};
   }
@@ -276,7 +283,10 @@ class MemoryMediaStorage {
       return null;
     }
     const object = this.objects.get(key);
-    return object ? { httpMetadata: object.httpMetadata } : null;
+    return object ? {
+      httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
+    } : null;
   }
 
   async putStream(key, body, contentLength, options) {
@@ -305,6 +315,7 @@ class MemoryMediaStorage {
     this.objects.set(key, {
       bytes,
       httpMetadata: options.httpMetadata,
+      customMetadata: options.customMetadata,
     });
     if (this.failAfterCommitKey === key) {
       this.failAfterCommitKey = undefined;
@@ -352,6 +363,7 @@ test("R2 S3 media writes stream the known-length body with create-once metadata"
       contentType: "image/webp",
       cacheControl: "public, max-age=31536000, immutable",
     },
+    customMetadata: { thumbhash: "dGVzdA==" },
   };
 
   assert.deepEqual(await storage.putStream("original/u_test.webp", Readable.from([bytes]), bytes.byteLength, options), {});
@@ -361,6 +373,7 @@ test("R2 S3 media writes stream the known-length body with create-once metadata"
   assert.equal(request.headers["if-none-match"], "*");
   assert.equal(request.headers["content-type"], "image/webp");
   assert.equal(request.headers["cache-control"], options.httpMetadata.cacheControl);
+  assert.equal(request.headers["x-amz-meta-thumbhash"], options.customMetadata.thumbhash);
   assert.equal(request.body.compare(bytes), 0);
   assert.doesNotMatch(request.headers["content-encoding"] ?? "", /aws-chunked/i);
   assert.equal(request.headers["transfer-encoding"], undefined);
@@ -398,6 +411,13 @@ function newUpload() {
 
 function preparedKey(sourceKey) {
   return `${sourceKey}.webp`;
+}
+
+function decodeThumbhash(value) {
+  assert.equal(typeof value, "string");
+  const bytes = Buffer.from(value, "base64");
+  assert(bytes.byteLength > 0);
+  return Uint8Array.from(bytes);
 }
 
 function withTimeout(promise, timeoutMs, message) {
@@ -531,6 +551,7 @@ async function awaitUploadWorkflowWaiting(environment, staging, id, sourceKey) {
     const history = await environment.client.workflow.getHandle(`media-upload:${id}`).fetchHistory();
     return history.events.some((event) => event.timerStartedEventAttributes);
   }, "upload workflow did not reach its durable publish wait");
+  assert.equal(typeof staging.objects.get(preparedKey(sourceKey)).customMetadata?.thumbhash, "string");
 }
 
 function startedInput(history) {
@@ -559,6 +580,39 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert(transparentPrepared);
   assert.equal(orientedPrepared.httpMetadata.contentType, "image/webp");
   assert.equal(transparentPrepared.httpMetadata.contentType, "image/webp");
+  const orientedThumbhash = decodeThumbhash(orientedPrepared.customMetadata?.thumbhash);
+  const transparentThumbhash = decodeThumbhash(transparentPrepared.customMetadata?.thumbhash);
+  assert(Math.abs(thumbHashToApproximateAspectRatio(orientedThumbhash) - 0.5) < 0.1);
+  assert(Math.abs(thumbHashToApproximateAspectRatio(transparentThumbhash) - 2) < 0.1);
+  const transparentRgba = thumbHashToRGBA(transparentThumbhash).rgba;
+  assert(transparentRgba.some(
+    (value, index) => index % 4 === 3 && value < 255,
+  ));
+  const sourcePixels = await sharp(PNG_RGBA_2X1)
+    .toColourspace("srgb")
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  let alphaSum = 0;
+  const colorSums = [0, 0, 0];
+  for (let index = 0; index < sourcePixels.data.length; index += 4) {
+    const alpha = sourcePixels.data[index + 3] / 255;
+    alphaSum += alpha;
+    for (let channel = 0; channel < 3; channel += 1) {
+      colorSums[channel] += alpha * sourcePixels.data[index + channel] / 255;
+    }
+  }
+  const averageColor = thumbHashToAverageRGBA(transparentThumbhash);
+  assert(Math.abs(averageColor.r - colorSums[0] / alphaSum) < 0.05);
+  assert(Math.abs(averageColor.g - colorSums[1] / alphaSum) < 0.05);
+  assert(Math.abs(averageColor.b - colorSums[2] / alphaSum) < 0.05);
+  assert(Math.abs(averageColor.a - alphaSum / (sourcePixels.data.length / 4)) < 0.05);
+  await activities.prepareUploadImage(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
+  await activities.prepareUploadImage(uploadInput(transparent.id, transparent.sourceKey));
+  assert.equal(staging.contentReads.get(oriented.sourceKey), 1);
+  assert.equal(staging.contentReads.get(transparent.sourceKey), 1);
+  assert.equal(staging.objects.get(preparedKey(oriented.sourceKey)).customMetadata.thumbhash, orientedPrepared.customMetadata.thumbhash);
+  assert.equal(staging.objects.get(preparedKey(transparent.sourceKey)).customMetadata.thumbhash, transparentPrepared.customMetadata.thumbhash);
   assert.equal(media.objects.size, 0);
 
   await activities.publishPreparedUpload(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
@@ -567,6 +621,7 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   const orientedImage = media.objects.get(`original/${oriented.id}.webp`);
   assert(orientedImage);
   assert.deepEqual(orientedImage.bytes, orientedPrepared.bytes);
+  assert.equal(orientedImage.customMetadata?.thumbhash, orientedPrepared.customMetadata?.thumbhash);
   assert.equal(media.streamReads.get(`original/${oriented.id}.webp`), 1);
   assert.equal(media.streams.get(`original/${oriented.id}.webp`).destroyed, true);
   const orientedMetadata = await sharp(orientedImage.bytes).metadata();
@@ -579,6 +634,7 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   const transparentImage = media.objects.get(`original/${transparent.id}.webp`);
   assert(transparentImage);
   assert.deepEqual(transparentImage.bytes, transparentPrepared.bytes);
+  assert.equal(transparentImage.customMetadata?.thumbhash, transparentPrepared.customMetadata?.thumbhash);
   assert.equal(media.streamReads.get(`original/${transparent.id}.webp`), 1);
   assert.equal(media.streams.get(`original/${transparent.id}.webp`).destroyed, true);
   const decoded = await sharp(transparentImage.bytes)
@@ -588,6 +644,46 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert.equal(decoded.info.width, 2);
   assert.equal(decoded.info.height, 1);
   assert.equal(decoded.data[7], 0);
+});
+
+test("legacy prepared WebP objects without ThumbHash are reused without backfill", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const source = newUpload();
+  const input = uploadInput(source.id, source.sourceKey);
+  const key = preparedKey(source.sourceKey);
+  const bytes = Buffer.from("legacy prepared webp");
+  staging.objects.set(key, {
+    bytes,
+    lastModified: new Date(),
+    httpMetadata: { contentType: "image/webp" },
+  });
+
+  await activities.prepareUploadImage(input);
+  assert.equal(staging.contentReads.get(source.sourceKey) ?? 0, 0);
+  assert.deepEqual(staging.putStreamKeys, []);
+  assert.equal(staging.objects.get(key).customMetadata, undefined);
+
+  await activities.publishPreparedUpload(input);
+  const published = media.objects.get(`original/${source.id}.webp`);
+  assert.deepEqual(published.bytes, bytes);
+  assert.equal(published.customMetadata, undefined);
+});
+
+test("ThumbHash generation bounds large images while preserving their aspect ratio", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const source = newUpload();
+  const image = await sharp({
+    create: { width: 640, height: 320, channels: 3, background: { r: 18, g: 91, b: 203 } },
+  }).png().toBuffer();
+  staging.seed(source.sourceKey, image);
+
+  await activities.prepareUploadImage(uploadInput(source.id, source.sourceKey));
+  const hash = decodeThumbhash(staging.objects.get(preparedKey(source.sourceKey)).customMetadata?.thumbhash);
+  assert(Math.abs(thumbHashToApproximateAspectRatio(hash) - 2) < 0.1);
 });
 
 test("legacy image activity returns an existing public object without staged reads or writes", async () => {
@@ -659,6 +755,34 @@ test("prepared publication retries a public write without rereading or reencodin
   assert.equal(media.streams.get(outputKey).destroyed, true);
   assert.equal(staging.contentReads.get(source.sourceKey), 1);
   assert.deepEqual(staging.putStreamKeys, [preparedObjectKey]);
+});
+
+test("Hope publication copies the original prepared ThumbHash to the public object", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const source = newUpload();
+  const input = uploadInput(source.id, source.sourceKey);
+  const defaultPreparedKey = preparedKey(source.sourceKey);
+  staging.seed(source.sourceKey, PNG_RGBA_2X1);
+  await activities.prepareUploadImage(input);
+  const originalThumbhash = staging.objects.get(defaultPreparedKey).customMetadata?.thumbhash;
+  assert.equal(typeof originalThumbhash, "string");
+
+  const requestId = randomUUID();
+  const hopeKey = hopePreparedUploadKey(source.sourceKey, requestId);
+  const hopeBytes = Buffer.from("protected webp bytes");
+  staging.objects.set(hopeKey, {
+    bytes: hopeBytes,
+    lastModified: new Date(),
+    httpMetadata: { contentType: "image/webp" },
+    customMetadata: { thumbhash: "hope-variant-hash" },
+  });
+
+  await activities.publishPreparedUpload({ ...input, hopeRequestId: requestId });
+  const published = media.objects.get(`original/${source.id}.webp`);
+  assert.deepEqual(published.bytes, hopeBytes);
+  assert.equal(published.customMetadata?.thumbhash, originalThumbhash);
 });
 
 test("Temporal activity classifies native malformed decodes as non-retryable invalid_image without a public write", async () => {
@@ -1463,6 +1587,8 @@ test("Nexus applyHope waits for queued processing and publishes its private vari
     const hopeKey = hopePreparedUploadKey(source.sourceKey, scheduledInput.requestId);
 
     await delay(100);
+    assert.equal(typeof staging.objects.get(defaultKey).customMetadata?.thumbhash, "string");
+    assert.equal(media.objects.has(publicKey), false);
     assert.equal((await Promise.race([
       hopeOutcomePromise.then(() => true),
       delay(0).then(() => false),

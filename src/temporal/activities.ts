@@ -384,6 +384,7 @@ export function createUploadProcessingActivities(
     };
     if (await media.head(outputKey)) return result;
 
+    const thumbhash = (await staging.head(preparedUploadKey(input.sourceKey)))?.customMetadata?.thumbhash;
     const prepared = await staging.getStream(stagingKey, "image/webp");
     if (!prepared) throw new Error("prepared upload object is missing");
     try {
@@ -397,6 +398,7 @@ export function createUploadProcessingActivities(
             contentType: "image/webp",
             cacheControl: IMMUTABLE_CACHE_CONTROL,
           },
+          ...(thumbhash === undefined ? {} : { customMetadata: { thumbhash } }),
         },
       );
       if (!stored && !(await media.head(outputKey))) {
