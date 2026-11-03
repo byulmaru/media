@@ -1,6 +1,7 @@
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_DIMENSION } from "./constants";
 import { HttpError } from "./errors";
 import { validateImageUpload } from "./image-info";
-import { isPreparedUpload, preparedUploadKey } from "./prepared-upload";
+import { isPreparedUpload, preparedUploadKey, uploadSourceKey } from "./prepared-upload";
 import type { UploadStagingStorage } from "./storage/staging";
 import type { ProcessUploadInput } from "./temporal/types";
 import { transcodeUploadImage } from "./temporal/codec";
@@ -10,27 +11,35 @@ type PreparedUploadStorage = Pick<UploadStagingStorage, "head" | "get" | "putStr
 export async function ensurePreparedUpload(
   storage: PreparedUploadStorage,
   input: ProcessUploadInput,
-): Promise<void> {
-  const key = preparedUploadKey(input.sourceKey);
+  sourceBytes?: ArrayBuffer,
+): Promise<string | undefined> {
+  const sourceKey = uploadSourceKey(input.id);
+  const key = preparedUploadKey(sourceKey);
   const existing = await storage.head(key);
   if (existing) {
-    if (isPreparedUpload(existing)) return;
+    if (isPreparedUpload(existing)) return existing.customMetadata?.thumbhash;
     throw new Error("prepared upload metadata is invalid");
   }
 
-  let bytes: ArrayBuffer;
-  try {
-    bytes = await storage.get(input.sourceKey, input.maxBytes);
-  } catch (error) {
-    if (error instanceof RangeError) {
-      throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
+  let bytes = sourceBytes;
+  if (bytes === undefined) {
+    try {
+      bytes = await storage.get(sourceKey, DEFAULT_MAX_BYTES);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
+      }
+      throw error;
     }
-    throw error;
   }
-  if (bytes.byteLength > input.maxBytes) {
+  if (bytes.byteLength > DEFAULT_MAX_BYTES) {
     throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
   }
-  const info = validateImageUpload(bytes, input.contentType, input);
+  const source = await storage.head(sourceKey);
+  const info = validateImageUpload(bytes, source?.httpMetadata?.contentType ?? "", {
+    maxBytes: DEFAULT_MAX_BYTES,
+    maxDimension: DEFAULT_MAX_DIMENSION,
+  });
 
   const transformStarted = Date.now();
   const output = await transcodeUploadImage(bytes);
@@ -58,11 +67,17 @@ export async function ensurePreparedUpload(
       {
         onlyIf: new Headers({ "If-None-Match": "*" }),
         httpMetadata: { contentType: "image/webp" },
+        customMetadata: { thumbhash: output.thumbhash },
       },
     );
-    if (!stored && !isPreparedUpload(await storage.head(key))) {
-      throw new Error("conditional prepared upload write could not be confirmed");
+    if (!stored) {
+      const winner = await storage.head(key);
+      if (!isPreparedUpload(winner)) {
+        throw new Error("conditional prepared upload write could not be confirmed");
+      }
+      return winner?.customMetadata?.thumbhash;
     }
+    return output.thumbhash;
   } finally {
     output.stream.destroy();
   }

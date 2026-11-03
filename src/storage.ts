@@ -1,5 +1,6 @@
 export interface MediaObject {
   httpMetadata?: { contentType?: string };
+  customMetadata?: Record<string, string>;
   size?: number;
   uploaded?: Date;
 }
@@ -7,6 +8,7 @@ export interface MediaObject {
 export interface MediaPutOptions {
   onlyIf: Headers;
   httpMetadata: { contentType?: string; cacheControl?: string };
+  customMetadata?: Record<string, string>;
 }
 
 export interface MediaStorage {

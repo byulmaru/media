@@ -5,6 +5,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import sharp from "sharp";
+import {
+  thumbHashToApproximateAspectRatio,
+  thumbHashToAverageRGBA,
+  thumbHashToRGBA,
+} from "thumbhash";
 
 import {
   GetObjectCommand,
@@ -45,10 +50,6 @@ function hopeActivityInput(options = {}) {
   const id = options.id ?? `u_${randomUUID()}`;
   return {
     id,
-    sourceKey: options.sourceKey ?? `uploads/${id}/${randomUUID()}`,
-    contentType: "image/png",
-    maxBytes: DEFAULT_MAX_BYTES,
-    maxDimension: 8192,
     requestId: randomUUID(),
     maxEdge: 1024,
     hope: { algorithm: "nightshade", iterations: 750, intensity: 0.3 },
@@ -97,12 +98,15 @@ test("staging adapter maps missing metadata and bounds streamed reads", async ()
     async send(command) {
       assert(command instanceof GetObjectCommand);
       return {
-        ContentLength: 5,
+        ContentLength: DEFAULT_MAX_BYTES + 1,
         Body: Object.assign((async function* () {})(), { destroy() { destroyed = true; } }),
       };
     },
   }, "media-staging");
-  await assert.rejects(oversizedByHeader.get("uploads/large", 4), /exceeds maxBytes/);
+  await assert.rejects(
+    oversizedByHeader.get("uploads/large", DEFAULT_MAX_BYTES),
+    /exceeds maxBytes/,
+  );
   assert.equal(destroyed, true);
 
   destroyed = false;
@@ -157,6 +161,7 @@ class MemoryStagingStorage {
   objects = new Map();
   lastModifiedReads = new Map();
   contentReads = new Map();
+  getMaxBytes = new Map();
   streamReads = new Map();
   putStreamKeys = [];
   deleteKeys = [];
@@ -177,6 +182,7 @@ class MemoryStagingStorage {
     const object = this.objects.get(key);
     return object ? {
       httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
       size: object.bytes.byteLength,
       uploaded: object.lastModified,
     } : null;
@@ -190,6 +196,7 @@ class MemoryStagingStorage {
 
   async get(key, maxBytes) {
     this.contentReads.set(key, (this.contentReads.get(key) ?? 0) + 1);
+    this.getMaxBytes.set(key, maxBytes);
     const object = this.objects.get(key);
     if (!object) throw new Error("missing staged upload");
     if (object.bytes.byteLength > maxBytes) throw new RangeError("staging object exceeds maxBytes");
@@ -216,6 +223,7 @@ class MemoryStagingStorage {
       bytes,
       lastModified: new Date(),
       httpMetadata: options.httpMetadata,
+      customMetadata: options.customMetadata,
     });
     return {};
   }
@@ -352,6 +360,7 @@ test("R2 S3 media writes stream the known-length body with create-once metadata"
       contentType: "image/webp",
       cacheControl: "public, max-age=31536000, immutable",
     },
+    customMetadata: { fixture: "storage-test" },
   };
 
   assert.deepEqual(await storage.putStream("original/u_test.webp", Readable.from([bytes]), bytes.byteLength, options), {});
@@ -361,6 +370,7 @@ test("R2 S3 media writes stream the known-length body with create-once metadata"
   assert.equal(request.headers["if-none-match"], "*");
   assert.equal(request.headers["content-type"], "image/webp");
   assert.equal(request.headers["cache-control"], options.httpMetadata.cacheControl);
+  assert.equal(request.headers["x-amz-meta-fixture"], options.customMetadata.fixture);
   assert.equal(request.body.compare(bytes), 0);
   assert.doesNotMatch(request.headers["content-encoding"] ?? "", /aws-chunked/i);
   assert.equal(request.headers["transfer-encoding"], undefined);
@@ -381,23 +391,28 @@ test("R2 S3 media writes stream the known-length body with create-once metadata"
   );
 });
 
-function uploadInput(id, sourceKey, contentType = "image/png") {
-  return {
-    id,
-    sourceKey,
-    contentType,
-    maxBytes: 1024 * 1024,
-    maxDimension: 8192,
-  };
+function uploadInput(id) {
+  return { id };
+}
+
+function testSourceKey(id) {
+  return `uploads/${id}/${id.slice(2)}`;
 }
 
 function newUpload() {
   const id = `u_${randomUUID()}`;
-  return { id, sourceKey: `uploads/${id}/${randomUUID()}` };
+  return { id, sourceKey: testSourceKey(id) };
 }
 
 function preparedKey(sourceKey) {
   return `${sourceKey}.webp`;
+}
+
+function decodeThumbhash(value) {
+  assert.equal(typeof value, "string");
+  const bytes = Buffer.from(value, "base64");
+  assert(bytes.byteLength > 0);
+  return Uint8Array.from(bytes);
 }
 
 function withTimeout(promise, timeoutMs, message) {
@@ -531,6 +546,7 @@ async function awaitUploadWorkflowWaiting(environment, staging, id, sourceKey) {
     const history = await environment.client.workflow.getHandle(`media-upload:${id}`).fetchHistory();
     return history.events.some((event) => event.timerStartedEventAttributes);
   }, "upload workflow did not reach its durable publish wait");
+  assert.equal(typeof staging.objects.get(preparedKey(sourceKey)).customMetadata?.thumbhash, "string");
 }
 
 function startedInput(history) {
@@ -547,11 +563,19 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
   const oriented = newUpload();
   const transparent = newUpload();
-  staging.seed(oriented.sourceKey, JPEG_ORIENTED_2X1);
+  const legacyTransparentInput = {
+    ...uploadInput(transparent.id),
+    contentType: "image/jpeg",
+    maxBytes: 1,
+    maxDimension: 1,
+  };
+  staging.seed(oriented.sourceKey, JPEG_ORIENTED_2X1, new Date(), "image/jpeg");
   staging.seed(transparent.sourceKey, PNG_RGBA_2X1);
 
-  await activities.prepareUploadImage(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
-  await activities.prepareUploadImage(uploadInput(transparent.id, transparent.sourceKey));
+  await activities.prepareUploadImage(uploadInput(oriented.id));
+  await activities.prepareUploadImage(legacyTransparentInput);
+  assert.equal(staging.getMaxBytes.get(oriented.sourceKey), DEFAULT_MAX_BYTES);
+  assert.equal(staging.getMaxBytes.get(transparent.sourceKey), DEFAULT_MAX_BYTES);
 
   const orientedPrepared = staging.objects.get(preparedKey(oriented.sourceKey));
   const transparentPrepared = staging.objects.get(preparedKey(transparent.sourceKey));
@@ -559,10 +583,44 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert(transparentPrepared);
   assert.equal(orientedPrepared.httpMetadata.contentType, "image/webp");
   assert.equal(transparentPrepared.httpMetadata.contentType, "image/webp");
+  const orientedThumbhash = decodeThumbhash(orientedPrepared.customMetadata?.thumbhash);
+  const transparentThumbhash = decodeThumbhash(transparentPrepared.customMetadata?.thumbhash);
+  // ThumbHash quantizes the short edge to 7 steps for opaque images and 5 for alpha images.
+  assert.equal(thumbHashToApproximateAspectRatio(orientedThumbhash), 4 / 7);
+  assert.equal(thumbHashToApproximateAspectRatio(transparentThumbhash), 5 / 3);
+  const transparentRgba = thumbHashToRGBA(transparentThumbhash).rgba;
+  assert(transparentRgba.some(
+    (value, index) => index % 4 === 3 && value < 255,
+  ));
+  const sourcePixels = await sharp(PNG_RGBA_2X1)
+    .toColourspace("srgb")
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  let alphaSum = 0;
+  const colorSums = [0, 0, 0];
+  for (let index = 0; index < sourcePixels.data.length; index += 4) {
+    const alpha = sourcePixels.data[index + 3] / 255;
+    alphaSum += alpha;
+    for (let channel = 0; channel < 3; channel += 1) {
+      colorSums[channel] += alpha * sourcePixels.data[index + channel] / 255;
+    }
+  }
+  const averageColor = thumbHashToAverageRGBA(transparentThumbhash);
+  assert(Math.abs(averageColor.r - colorSums[0] / alphaSum) < 0.05);
+  assert(Math.abs(averageColor.g - colorSums[1] / alphaSum) < 0.05);
+  assert(Math.abs(averageColor.b - colorSums[2] / alphaSum) < 0.05);
+  assert(Math.abs(averageColor.a - alphaSum / (sourcePixels.data.length / 4)) < 0.05);
+  await activities.prepareUploadImage(uploadInput(oriented.id));
+  await activities.prepareUploadImage(legacyTransparentInput);
+  assert.equal(staging.contentReads.get(oriented.sourceKey), 1);
+  assert.equal(staging.contentReads.get(transparent.sourceKey), 1);
+  assert.equal(staging.objects.get(preparedKey(oriented.sourceKey)).customMetadata.thumbhash, orientedPrepared.customMetadata.thumbhash);
+  assert.equal(staging.objects.get(preparedKey(transparent.sourceKey)).customMetadata.thumbhash, transparentPrepared.customMetadata.thumbhash);
   assert.equal(media.objects.size, 0);
 
-  await activities.publishPreparedUpload(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
-  await activities.publishPreparedUpload(uploadInput(transparent.id, transparent.sourceKey));
+  await activities.publishPreparedUpload(uploadInput(oriented.id));
+  await activities.publishPreparedUpload(legacyTransparentInput);
 
   const orientedImage = media.objects.get(`original/${oriented.id}.webp`);
   assert(orientedImage);
@@ -590,6 +648,45 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert.equal(decoded.data[7], 0);
 });
 
+test("legacy prepared WebP objects without ThumbHash are reused without backfill", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const source = newUpload();
+  const input = uploadInput(source.id);
+  const key = preparedKey(source.sourceKey);
+  const bytes = Buffer.from("legacy prepared webp");
+  staging.objects.set(key, {
+    bytes,
+    lastModified: new Date(),
+    httpMetadata: { contentType: "image/webp" },
+  });
+
+  await activities.prepareUploadImage(input);
+  assert.equal(staging.contentReads.get(source.sourceKey) ?? 0, 0);
+  assert.deepEqual(staging.putStreamKeys, []);
+  assert.equal(staging.objects.get(key).customMetadata, undefined);
+
+  await activities.publishPreparedUpload(input);
+  const published = media.objects.get(`original/${source.id}.webp`);
+  assert.deepEqual(published.bytes, bytes);
+});
+
+test("ThumbHash generation bounds large images while preserving their aspect ratio", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const source = newUpload();
+  const image = await sharp({
+    create: { width: 640, height: 320, channels: 3, background: { r: 18, g: 91, b: 203 } },
+  }).png().toBuffer();
+  staging.seed(source.sourceKey, image);
+
+  await activities.prepareUploadImage(uploadInput(source.id));
+  const hash = decodeThumbhash(staging.objects.get(preparedKey(source.sourceKey)).customMetadata?.thumbhash);
+  assert.equal(thumbHashToApproximateAspectRatio(hash), 7 / 4);
+});
+
 test("legacy image activity returns an existing public object without staged reads or writes", async () => {
   const staging = new MemoryStagingStorage();
   const media = new MemoryMediaStorage();
@@ -603,7 +700,7 @@ test("legacy image activity returns an existing public object without staged rea
   });
 
   assert.deepEqual(
-    await activities.processUploadImage(uploadInput(existing.id, existing.sourceKey)),
+    await activities.processUploadImage(uploadInput(existing.id)),
     {
       id: existing.id,
       url: `${PUBLIC_BASE_URL}/${outputKey}`,
@@ -623,7 +720,7 @@ test("prepared publication retries a public write without rereading or reencodin
   const media = new MemoryMediaStorage();
   const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
   const source = newUpload();
-  const input = uploadInput(source.id, source.sourceKey);
+  const input = uploadInput(source.id);
   const preparedObjectKey = preparedKey(source.sourceKey);
   const outputKey = `original/${source.id}.webp`;
   staging.seed(source.sourceKey, PNG_1X1);
@@ -669,7 +766,7 @@ test("Temporal activity classifies native malformed decodes as non-retryable inv
   staging.seed(malformed.sourceKey, PNG_RGBA_2X1.slice(0, 30));
 
   await assert.rejects(
-    activities.prepareUploadImage(uploadInput(malformed.id, malformed.sourceKey)),
+    activities.prepareUploadImage(uploadInput(malformed.id)),
     (error) => {
       assert(error instanceof ApplicationFailure);
       assert.equal(error.type, "UploadValidationError");
@@ -682,7 +779,94 @@ test("Temporal activity classifies native malformed decodes as non-retryable inv
   assert.equal(media.objects.has(`original/${malformed.id}.webp`), false);
   assert.equal(staging.objects.has(preparedKey(malformed.sourceKey)), false);
   assert.equal(staging.contentReads.get(malformed.sourceKey), 1);
+  assert.deepEqual(staging.putStreamKeys, []);
   assert.equal(media.streams.size, 0);
+});
+
+test("Temporal source validation uses stored MIME metadata and rejects missing MIME", async () => {
+  const mismatched = newUpload();
+  const mismatchedStaging = new MemoryStagingStorage();
+  const mismatchedActivities = createUploadProcessingActivities(
+    mismatchedStaging,
+    new MemoryMediaStorage(),
+    PUBLIC_BASE_URL,
+  );
+  mismatchedStaging.seed(mismatched.sourceKey, PNG_RGBA_2X1, new Date(), "image/jpeg");
+  await assert.rejects(
+    mismatchedActivities.prepareUploadImage({
+      ...uploadInput(mismatched.id),
+      contentType: "image/png",
+      maxBytes: 1,
+    }),
+    (error) => {
+      assert(error instanceof ApplicationFailure);
+      assert.equal(error.type, "UploadValidationError");
+      assert.equal(error.nonRetryable, true);
+      assert.deepEqual(error.details, [{ status: 415, code: "content_type_mismatch" }]);
+      return true;
+    },
+  );
+
+  const missingMime = newUpload();
+  const missingMimeStaging = new MemoryStagingStorage();
+  const missingMimeActivities = createUploadProcessingActivities(
+    missingMimeStaging,
+    new MemoryMediaStorage(),
+    PUBLIC_BASE_URL,
+  );
+  missingMimeStaging.objects.set(testSourceKey(missingMime.id), {
+    bytes: Uint8Array.from(PNG_RGBA_2X1),
+    lastModified: new Date(),
+  });
+  await assert.rejects(
+    missingMimeActivities.prepareUploadImage(uploadInput(missingMime.id)),
+    (error) => {
+      assert(error instanceof ApplicationFailure);
+      assert.equal(error.type, "UploadValidationError");
+      assert.equal(error.nonRetryable, true);
+      assert.deepEqual(error.details, [{ status: 415, code: "content_type_mismatch" }]);
+      return true;
+    },
+  );
+});
+
+test("Temporal and Hope source validation keep the fixed dimension cap despite legacy overrides", async () => {
+  const oversizedSource = await sharp({
+    create: { width: 8193, height: 1, channels: 3, background: { r: 18, g: 91, b: 203 } },
+  }).png().toBuffer();
+
+  const upload = newUpload();
+  const uploadStaging = new MemoryStagingStorage();
+  uploadStaging.seed(upload.sourceKey, oversizedSource);
+  const uploadActivities = createUploadProcessingActivities(
+    uploadStaging,
+    new MemoryMediaStorage(),
+    PUBLIC_BASE_URL,
+  );
+  await assert.rejects(
+    uploadActivities.prepareUploadImage({
+      ...uploadInput(upload.id),
+      maxDimension: 16_384,
+    }),
+    (error) => error instanceof ApplicationFailure && error.type === "UploadValidationError" &&
+      error.nonRetryable && error.details?.[0]?.code === "dimension_limit_exceeded",
+  );
+  assert.equal(uploadStaging.objects.has(preparedKey(upload.sourceKey)), false);
+
+  const hope = hopeActivityInput({ maxDimension: 16_384 });
+  const hopeStaging = new MemoryStagingStorage();
+  hopeStaging.seed(testSourceKey(hope.id), oversizedSource);
+  const hopeEnvironment = new MockActivityEnvironment();
+  await assert.rejects(
+    hopeEnvironment.run(createHopeProcessingActivities(
+      hopeStaging,
+      "https://hope.tailnet.example",
+      async () => assert.fail("oversized source must not call Hope"),
+    ).prepareHopeUpload, hope),
+    (error) => error instanceof ApplicationFailure && error.type === "UploadValidationError" &&
+      error.nonRetryable && error.details?.[0]?.code === "dimension_limit_exceeded",
+  );
+  assert.equal(hopeStaging.putStreamKeys.length, 0);
 });
 
 test("Temporal activity destroys an unconsumed WebP stream after a conditional conflict or storage error", async () => {
@@ -698,7 +882,7 @@ test("Temporal activity destroys an unconsumed WebP stream after a conditional c
   });
   media.conflictKey = conflictKey;
   media.conflictHeadMisses = 2;
-  await activities.processUploadImage(uploadInput(conflict.id, conflict.sourceKey));
+  await activities.processUploadImage(uploadInput(conflict.id));
   assert.equal(media.putCounts.get(conflictKey), 1);
   assert.equal(media.streamReads.get(conflictKey) ?? 0, 0);
   assert.equal(media.streams.get(conflictKey).destroyed, true);
@@ -708,7 +892,7 @@ test("Temporal activity destroys an unconsumed WebP stream after a conditional c
   staging.seed(failed.sourceKey, PNG_1X1);
   media.failStreamKey = failedKey;
   await assert.rejects(
-    activities.processUploadImage(uploadInput(failed.id, failed.sourceKey)),
+    activities.processUploadImage(uploadInput(failed.id)),
     /injected media stream failure/,
   );
   assert.equal(media.putCounts.get(failedKey), 1);
@@ -723,7 +907,7 @@ test("Temporal activity destroys an unconsumed WebP stream after a conditional c
   media.failStreamKey = transportFailedKey;
   media.failStreamError = transportError;
   await assert.rejects(
-    activities.processUploadImage(uploadInput(transportFailed.id, transportFailed.sourceKey)),
+    activities.processUploadImage(uploadInput(transportFailed.id)),
     (error) => {
       assert.equal(error, transportError);
       assert.equal(error instanceof ApplicationFailure, false);
@@ -749,7 +933,13 @@ test("markerless legacy history replays without preparing until publish is signa
   const media = new MemoryMediaStorage();
   const workerFailures = [];
   const source = newUpload();
-  const input = uploadInput(source.id, source.sourceKey);
+  const input = {
+    ...uploadInput(source.id),
+    sourceKey: source.sourceKey,
+    contentType: "image/png",
+    maxBytes: 1024 * 1024,
+    maxDimension: 8192,
+  };
   staging.seed(source.sourceKey, PNG_1X1);
   let worker;
 
@@ -835,7 +1025,13 @@ test("prepared-before-wait history replays with the Hope-aware workflow", async 
   const workerFailures = [];
   const previousCalls = { prepare: 0 };
   const source = newUpload();
-  const input = uploadInput(source.id, source.sourceKey);
+  const input = {
+    ...uploadInput(source.id),
+    sourceKey: source.sourceKey,
+    contentType: "image/png",
+    maxBytes: 1024 * 1024,
+    maxDimension: 8192,
+  };
   const defaultKey = preparedKey(source.sourceKey);
   const publicKey = `original/${source.id}.webp`;
   staging.seed(source.sourceKey, PNG_1X1);
@@ -942,8 +1138,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
   try {
     worker = await startWorker(environment, workflowBundle, staging, media, workerFailures);
 
-    const invalid = newUpload();
-    const invalidInput = uploadInput(invalid.id, `uploads/${newUpload().id}/${randomUUID()}`);
+    const invalidInput = { id: "not-an-upload-id" };
     const invalidCaller = await startCaller(
       environment,
       endpointName,
@@ -1022,7 +1217,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       blockedCaller = await startCaller(
         environment,
         endpointName,
-        uploadInput(blocked.id, blocked.sourceKey),
+        uploadInput(blocked.id),
         `blocked-caller:${randomUUID()}`,
       );
       await withTimeout(blockedGetStarted, WORKFLOW_TIMEOUT_MS, "first upload did not start preparation");
@@ -1037,7 +1232,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       const concurrentCaller = await startCaller(
         environment,
         endpointName,
-        uploadInput(concurrent.id, concurrent.sourceKey),
+        uploadInput(concurrent.id),
         `concurrent-caller:${randomUUID()}`,
       );
       await awaitUploadWorkflowWaiting(environment, staging, concurrent.id, concurrent.sourceKey);
@@ -1078,8 +1273,16 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.equal(staging.deleteKeys.includes(blocked.sourceKey), true);
 
     const successful = newUpload();
-    const successfulInput = uploadInput(successful.id, successful.sourceKey);
-    staging.seed(successful.sourceKey, PNG_1X1);
+    const legacySource = newUpload();
+    const successfulInput = {
+      ...uploadInput(successful.id),
+      sourceKey: legacySource.sourceKey,
+      contentType: "image/jpeg",
+      maxBytes: 1,
+      maxDimension: 1,
+    };
+    staging.seed(successful.sourceKey, PNG_RGBA_2X1);
+    staging.seed(legacySource.sourceKey, PNG_1X1);
     const successfulCaller = await startCaller(
       environment,
       endpointName,
@@ -1089,24 +1292,28 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     await awaitUploadWorkflowWaiting(environment, staging, successful.id, successful.sourceKey);
     const outputKey = `original/${successful.id}.webp`;
     assert.equal(staging.contentReads.get(successful.sourceKey), 1);
+    assert.equal(staging.lastModifiedReads.get(legacySource.sourceKey) ?? 0, 0);
+    assert.equal(staging.contentReads.get(legacySource.sourceKey) ?? 0, 0);
+    assert.equal(staging.objects.has(legacySource.sourceKey), true);
+    assert.equal(staging.getMaxBytes.get(successful.sourceKey), DEFAULT_MAX_BYTES);
     const preparedOutputKey = preparedKey(successful.sourceKey);
     const preparedBytes = Buffer.from(staging.objects.get(preparedOutputKey).bytes);
     assert.equal(media.putCounts.get(outputKey) ?? 0, 0);
     assert.equal(media.objects.has(outputKey), false);
 
     const history = await environment.client.workflow.getHandle(`media-upload:${successful.id}`).fetchHistory();
-    assert.deepEqual(startedInput(history), successfulInput);
-    assert.equal(JSON.stringify(history.events).includes(PNG_1X1.toString("base64")), false);
+    assert.deepEqual(startedInput(history), uploadInput(successful.id));
+    assert.equal(JSON.stringify(history.events).includes(PNG_RGBA_2X1.toString("base64")), false);
     const callerHistory = await environment.client.workflow.getHandle(successfulCaller.workflowId).fetchHistory();
-    assert.equal(JSON.stringify(callerHistory.events).includes(PNG_1X1.toString("base64")), false);
+    assert.equal(JSON.stringify(callerHistory.events).includes(PNG_RGBA_2X1.toString("base64")), false);
     staging.objects.delete(successful.sourceKey);
 
-    const duplicate = { id: successful.id, sourceKey: `uploads/${successful.id}/${randomUUID()}` };
+    const duplicate = { id: successful.id, sourceKey: `uploads/${successful.id}/00000000-0000-4000-8000-000000000099` };
     staging.seed(duplicate.sourceKey, PNG_1X1);
     const duplicateCaller = await startCaller(
       environment,
       endpointName,
-      uploadInput(duplicate.id, duplicate.sourceKey),
+      uploadInput(duplicate.id),
       `duplicate-caller:${randomUUID()}`,
       "3 seconds",
     );
@@ -1137,6 +1344,8 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.equal(staging.contentReads.get(successful.sourceKey), 1);
     assert.equal(staging.objects.has(successful.sourceKey), false);
     assert.equal(staging.deleteKeys.includes(successful.sourceKey), true);
+    assert.equal(staging.objects.has(legacySource.sourceKey), true);
+    assert.equal(staging.deleteKeys.includes(legacySource.sourceKey), false);
     const stored = media.objects.get(outputKey);
     assert(stored);
     assert.deepEqual(stored.bytes, preparedBytes);
@@ -1152,7 +1361,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     const cleanupFailureCaller = await startCaller(
       environment,
       endpointName,
-      uploadInput(cleanupFailure.id, cleanupFailure.sourceKey),
+      uploadInput(cleanupFailure.id),
       `cleanup-failure-caller:${randomUUID()}`,
     );
     await awaitUploadWorkflowWaiting(environment, staging, cleanupFailure.id, cleanupFailure.sourceKey);
@@ -1186,7 +1395,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     const terminalCleanupCaller = await startCaller(
       environment,
       endpointName,
-      uploadInput(terminalCleanupFailure.id, terminalCleanupFailure.sourceKey),
+      uploadInput(terminalCleanupFailure.id),
       `terminal-cleanup-failure-caller:${randomUUID()}`,
     );
     await awaitUploadWorkflowWaiting(
@@ -1236,7 +1445,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     assert.match(completedPublishResult.error, /upload workflow was not found/i);
 
     const badImage = newUpload();
-    const badImageInput = uploadInput(badImage.id, badImage.sourceKey);
+    const badImageInput = uploadInput(badImage.id);
     staging.seed(badImage.sourceKey, Uint8Array.from([1, 2, 3, 4]));
     const badImageCaller = await startCaller(
       environment,
@@ -1270,7 +1479,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       const caller = await startCaller(
         environment,
         endpointName,
-        uploadInput(source.id, source.sourceKey),
+        uploadInput(source.id),
         `${label}-metadata-caller:${randomUUID()}`,
       );
       await waitFor(
@@ -1306,7 +1515,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     const expiringCaller = await startCaller(
       environment,
       endpointName,
-      uploadInput(expiring.id, expiring.sourceKey),
+      uploadInput(expiring.id),
       `expiring-caller:${randomUUID()}`,
     );
     try {
@@ -1341,7 +1550,7 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
     const cancelledCaller = await startCaller(
       environment,
       endpointName,
-      uploadInput(cancelled.id, cancelled.sourceKey),
+      uploadInput(cancelled.id),
       `cancelled-caller:${randomUUID()}`,
     );
     await awaitUploadWorkflowWaiting(environment, staging, cancelled.id, cancelled.sourceKey);
@@ -1414,7 +1623,7 @@ test("Nexus applyHope waits for queued processing and publishes its private vari
     );
 
     const source = newUpload();
-    const input = uploadInput(source.id, source.sourceKey);
+    const input = uploadInput(source.id);
     const defaultKey = preparedKey(source.sourceKey);
     const publicKey = "original/" + source.id + ".webp";
     staging.seed(source.sourceKey, PNG_1X1);
@@ -1463,6 +1672,8 @@ test("Nexus applyHope waits for queued processing and publishes its private vari
     const hopeKey = hopePreparedUploadKey(source.sourceKey, scheduledInput.requestId);
 
     await delay(100);
+    assert.equal(typeof staging.objects.get(defaultKey).customMetadata?.thumbhash, "string");
+    assert.equal(media.objects.has(publicKey), false);
     assert.equal((await Promise.race([
       hopeOutcomePromise.then(() => true),
       delay(0).then(() => false),
@@ -1482,7 +1693,7 @@ test("Nexus applyHope waits for queued processing and publishes its private vari
         await prepareGate.promise;
         cancellationSignal.throwIfAborted();
         await staging.putStream(
-          hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId),
+          hopePreparedUploadKey(testSourceKey(activityInput.id), activityInput.requestId),
           Readable.from([protectedWebp]),
           protectedWebp.byteLength,
           {
@@ -1490,7 +1701,7 @@ test("Nexus applyHope waits for queued processing and publishes its private vari
             httpMetadata: { contentType: "image/webp" },
           },
         );
-        const preparedKey = hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId);
+        const preparedKey = hopePreparedUploadKey(testSourceKey(activityInput.id), activityInput.requestId);
         assert.deepEqual(Buffer.from(staging.objects.get(preparedKey).bytes), protectedWebp);
       },
       workerFailures,
@@ -1607,7 +1818,7 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
               type: HOPE_PROCESSING_ERROR_TYPE,
             });
           }
-          lastGoodKey = hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId);
+          lastGoodKey = hopePreparedUploadKey(testSourceKey(activityInput.id), activityInput.requestId);
           await staging.putStream(
             lastGoodKey,
             Readable.from([protectedWebp]),
@@ -1634,7 +1845,7 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
     );
 
     const source = newUpload();
-    const input = uploadInput(source.id, source.sourceKey);
+    const input = uploadInput(source.id);
     const defaultKey = preparedKey(source.sourceKey);
     const publicKey = "original/" + source.id + ".webp";
     staging.seed(source.sourceKey, PNG_1X1);
@@ -1669,7 +1880,7 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
     assert.deepEqual(activityInputs[0], activityInputs[1]);
     assert.equal(activityInputs[0].maxEdge, 1024);
     assert.equal(activityInputs[0].id, source.id);
-    assert.equal(activityInputs[0].sourceKey, source.sourceKey);
+    assert.equal(Object.hasOwn(activityInputs[0], "sourceKey"), false);
     assert.deepEqual(activityInputs[0].hope, { algorithm: "glaze", iterations: 29, intensity: 0.3 });
     assert(lastGoodKey);
     assert.equal(staging.objects.has(lastGoodKey), true);
@@ -1831,7 +2042,7 @@ test("Hope expiry cancels queued processing and caller cancellation drains an in
       environment,
       async (activityInput, cancellationSignal) => {
         if (activityInput.id === expiring.id) {
-          expiringHopeKey = hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId);
+          expiringHopeKey = hopePreparedUploadKey(testSourceKey(activityInput.id), activityInput.requestId);
           expiringActivityStarted.resolve(activityInput);
           await Promise.race([
             expiryGate.promise,
@@ -1845,7 +2056,7 @@ test("Hope expiry cancels queued processing and caller cancellation drains an in
         }
 
         assert.equal(activityInput.id, cancelled.id);
-        const hopeKey = hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId);
+        const hopeKey = hopePreparedUploadKey(testSourceKey(activityInput.id), activityInput.requestId);
         cancellationSignal.addEventListener("abort", () => workerCancellationReceived.resolve(), { once: true });
         await staging.putStream(
           hopeKey,
@@ -1873,7 +2084,7 @@ test("Hope expiry cancels queued processing and caller cancellation drains an in
     const expiringCaller = await startCaller(
       environment,
       endpointName,
-      uploadInput(expiring.id, expiring.sourceKey),
+      uploadInput(expiring.id),
       "hope-expiring-upload:" + randomUUID(),
     );
     const expiringOutcomePromise = expiringCaller.result().then(
@@ -1925,7 +2136,7 @@ test("Hope expiry cancels queued processing and caller cancellation drains an in
     const cancelledCaller = await startCaller(
       environment,
       endpointName,
-      uploadInput(cancelled.id, cancelled.sourceKey),
+      uploadInput(cancelled.id),
       "hope-cancelled-upload:" + randomUUID(),
     );
     const cancelledOutcomePromise = cancelledCaller.result().then(
@@ -2151,9 +2362,9 @@ test("Hope worker starts with five-second heartbeat throttling and concurrency o
 });
 
 test("Media Hope Activity validates and stores the returned WebP idempotently", async () => {
-  const input = hopeActivityInput();
+  const input = hopeActivityInput({ maxDimension: 1 });
   const staging = new MemoryStagingStorage();
-  staging.seed(input.sourceKey, PNG_RGBA_2X1);
+  staging.seed(testSourceKey(input.id), PNG_RGBA_2X1);
   const protectedBytes = await sharp(Buffer.from(PNG_RGBA_2X1)).webp({ quality: 80 }).toBuffer();
   const metadata = await sharp(protectedBytes).metadata();
   const requests = [];
@@ -2170,7 +2381,7 @@ test("Media Hope Activity validates and stores the returned WebP idempotently", 
   await environment.run(activity, input);
   await environment.run(activity, input);
 
-  const key = hopePreparedUploadKey(input.sourceKey, input.requestId);
+  const key = hopePreparedUploadKey(testSourceKey(input.id), input.requestId);
   const stored = staging.objects.get(key);
   assert.equal(requests.length, 1);
   assert.equal(new URL(requests[0].url).pathname, "/protect");
@@ -2192,7 +2403,7 @@ test("Media Hope Activity validates and stores the returned WebP idempotently", 
 test("Media Hope Activity preserves source validation, expiry and remote retry classification", async () => {
   const expired = hopeActivityInput();
   const expiredStaging = new MemoryStagingStorage();
-  expiredStaging.seed(expired.sourceKey, PNG_RGBA_2X1, new Date(Date.now() - 25 * 60 * 60 * 1000));
+  expiredStaging.seed(testSourceKey(expired.id), PNG_RGBA_2X1, new Date(Date.now() - 25 * 60 * 60 * 1000));
   const unexpectedFetch = async () => assert.fail("expired source must not call Hope");
   const expiredEnvironment = new MockActivityEnvironment();
   await assert.rejects(
@@ -2204,24 +2415,67 @@ test("Media Hope Activity preserves source validation, expiry and remote retry c
     (error) => error instanceof ApplicationFailure && error.type === "UploadExpiredError" && error.nonRetryable,
   );
 
-  for (const [label, source, maxBytes] of [
-    ["oversized", PNG_RGBA_2X1, PNG_RGBA_2X1.byteLength - 1],
-    ["corrupt", Buffer.from("not an image"), DEFAULT_MAX_BYTES],
-  ]) {
-    const input = hopeActivityInput({ maxBytes });
-    const staging = new MemoryStagingStorage();
-    staging.seed(input.sourceKey, source);
-    const environment = new MockActivityEnvironment();
-    await assert.rejects(
-      environment.run(createHopeProcessingActivities(
-        staging,
-        "https://hope.tailnet.example",
-        unexpectedFetch,
-      ).prepareHopeUpload, input),
-      (error) => error instanceof ApplicationFailure && error.type === "UploadValidationError" && error.nonRetryable,
-      label,
-    );
-  }
+  const oversized = hopeActivityInput({
+    contentType: "image/jpeg",
+    maxBytes: PNG_RGBA_2X1.byteLength - 1,
+  });
+  const oversizedStaging = new MemoryStagingStorage();
+  oversizedStaging.seed(testSourceKey(oversized.id), PNG_RGBA_2X1);
+  oversizedStaging.get = async (key, maxBytes) => {
+    assert.equal(maxBytes, DEFAULT_MAX_BYTES);
+    oversizedStaging.getMaxBytes.set(key, maxBytes);
+    throw new RangeError("staging object exceeds maxBytes");
+  };
+  const oversizedEnvironment = new MockActivityEnvironment();
+  await assert.rejects(
+    oversizedEnvironment.run(createHopeProcessingActivities(
+      oversizedStaging,
+      "https://hope.tailnet.example",
+      unexpectedFetch,
+    ).prepareHopeUpload, oversized),
+    (error) => {
+      assert(error instanceof ApplicationFailure);
+      assert.equal(error.type, "UploadValidationError");
+      assert.equal(error.nonRetryable, true);
+      assert.deepEqual(error.details, [{ status: 413, code: "size_limit_exceeded" }]);
+      return true;
+    },
+  );
+
+  const missingMime = hopeActivityInput({ contentType: "image/png" });
+  const missingMimeStaging = new MemoryStagingStorage();
+  missingMimeStaging.objects.set(testSourceKey(missingMime.id), {
+    bytes: Uint8Array.from(PNG_RGBA_2X1),
+    lastModified: new Date(),
+  });
+  const missingMimeEnvironment = new MockActivityEnvironment();
+  await assert.rejects(
+    missingMimeEnvironment.run(createHopeProcessingActivities(
+      missingMimeStaging,
+      "https://hope.tailnet.example",
+      unexpectedFetch,
+    ).prepareHopeUpload, missingMime),
+    (error) => {
+      assert(error instanceof ApplicationFailure);
+      assert.equal(error.type, "UploadValidationError");
+      assert.equal(error.nonRetryable, true);
+      assert.deepEqual(error.details, [{ status: 415, code: "content_type_mismatch" }]);
+      return true;
+    },
+  );
+
+  const corrupt = hopeActivityInput();
+  const corruptStaging = new MemoryStagingStorage();
+  corruptStaging.seed(testSourceKey(corrupt.id), Buffer.from("not an image"));
+  const corruptEnvironment = new MockActivityEnvironment();
+  await assert.rejects(
+    corruptEnvironment.run(createHopeProcessingActivities(
+      corruptStaging,
+      "https://hope.tailnet.example",
+      unexpectedFetch,
+    ).prepareHopeUpload, corrupt),
+    (error) => error instanceof ApplicationFailure && error.type === "UploadValidationError" && error.nonRetryable,
+  );
 
   for (const [status, retryable] of [
     [400, false], [401, false], [403, false], [404, false], [413, false], [415, false], [422, false],
@@ -2229,7 +2483,7 @@ test("Media Hope Activity preserves source validation, expiry and remote retry c
   ]) {
     const input = hopeActivityInput();
     const staging = new MemoryStagingStorage();
-    staging.seed(input.sourceKey, PNG_RGBA_2X1);
+    staging.seed(testSourceKey(input.id), PNG_RGBA_2X1);
     const environment = new MockActivityEnvironment();
     await assert.rejects(
       environment.run(createHopeProcessingActivities(
@@ -2247,7 +2501,7 @@ test("Media Hope Activity preserves source validation, expiry and remote retry c
 
   const networkInput = hopeActivityInput();
   const networkStaging = new MemoryStagingStorage();
-  networkStaging.seed(networkInput.sourceKey, PNG_RGBA_2X1);
+  networkStaging.seed(testSourceKey(networkInput.id), PNG_RGBA_2X1);
   const networkEnvironment = new MockActivityEnvironment();
   await assert.rejects(
     networkEnvironment.run(createHopeProcessingActivities(
@@ -2281,7 +2535,7 @@ test("Media Hope Activity rejects malformed, mismatched and oversized HTTP outpu
   for (const [label, response] of cases) {
     const input = hopeActivityInput();
     const staging = new MemoryStagingStorage();
-    staging.seed(input.sourceKey, PNG_RGBA_2X1);
+    staging.seed(testSourceKey(input.id), PNG_RGBA_2X1);
     const environment = new MockActivityEnvironment();
     await assert.rejects(
       environment.run(createHopeProcessingActivities(
@@ -2300,7 +2554,7 @@ test("Media Hope Activity rejects malformed, mismatched and oversized HTTP outpu
 test("Media Hope Activity aborts HTTP on cancellation and waits for a pending R2 write", async () => {
   const input = hopeActivityInput();
   const staging = new MemoryStagingStorage();
-  staging.seed(input.sourceKey, PNG_RGBA_2X1);
+  staging.seed(testSourceKey(input.id), PNG_RGBA_2X1);
   const requestStarted = deferred();
   let requestAborted = false;
   const requestEnvironment = new MockActivityEnvironment();
@@ -2325,9 +2579,9 @@ test("Media Hope Activity aborts HTTP on cancellation and waits for a pending R2
 
   const writeInput = hopeActivityInput();
   const writeStaging = new MemoryStagingStorage();
-  writeStaging.seed(writeInput.sourceKey, PNG_RGBA_2X1);
+  writeStaging.seed(testSourceKey(writeInput.id), PNG_RGBA_2X1);
   const protectedBytes = await sharp(Buffer.from(PNG_RGBA_2X1)).webp({ quality: 80 }).toBuffer();
-  const writeKey = hopePreparedUploadKey(writeInput.sourceKey, writeInput.requestId);
+  const writeKey = hopePreparedUploadKey(testSourceKey(writeInput.id), writeInput.requestId);
   const writeStarted = deferred();
   const writeGate = deferred();
   writeStaging.putGate = {

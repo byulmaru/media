@@ -5,6 +5,7 @@ import { createServer as createTcpServer } from "node:net";
 import { test } from "node:test";
 
 import { HeadObjectCommand, PutObjectCommand, S3ServiceException } from "@aws-sdk/client-s3";
+import { thumbHashToRGBA } from "thumbhash";
 import { R2S3MediaStorage, startServer } from "../dist/server.js";
 
 const PNG_1X1 = Buffer.from(
@@ -30,6 +31,7 @@ const putOptions = {
     contentType: "image/webp",
     cacheControl: "public, max-age=2592000, immutable",
   },
+  customMetadata: { thumbhash: "AQIDBA==" },
 };
 
 function s3Failure(status) {
@@ -105,6 +107,7 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
           ContentLength: 123,
           ContentType: "image/webp",
           LastModified: new Date("2026-10-21T00:00:00.000Z"),
+          Metadata: { thumbhash: "AQIDBA==" },
         };
       },
     },
@@ -112,6 +115,7 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
   );
   assert.deepEqual(await headStorage.head("original/u_existing.webp"), {
     httpMetadata: { contentType: "image/webp" },
+    customMetadata: { thumbhash: "AQIDBA==" },
     size: 123,
     uploaded: new Date("2026-10-21T00:00:00.000Z"),
   });
@@ -160,7 +164,7 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
   assert.equal(commands[0].input.IfNoneMatch, "*");
   assert.equal(commands[0].input.ContentType, "image/webp");
   assert.equal(commands[0].input.CacheControl, putOptions.httpMetadata.cacheControl);
-  assert.equal(commands[0].input.Metadata, undefined);
+  assert.deepEqual(commands[0].input.Metadata, putOptions.customMetadata);
 
   const conflictStorage = new R2S3MediaStorage(
     { async send() { throw s3Failure(412); } },
@@ -191,11 +195,13 @@ test("R2 S3 adapter maps metadata, missing objects, conditional conflicts, and f
 
 class MemoryMediaStorage {
   objects = new Map();
+  getCalls = 0;
 
   async head(key) {
     const object = this.objects.get(key);
     return object ? {
       httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
       size: object.size,
       uploaded: object.uploaded,
     } : null;
@@ -207,7 +213,33 @@ class MemoryMediaStorage {
     this.objects.set(key, {
       bytes: Buffer.from(value),
       httpMetadata: options.httpMetadata,
+      customMetadata: options.customMetadata,
       size: value.byteLength,
+      uploaded: new Date(),
+    });
+    return {};
+  }
+
+  async get(key, maxBytes) {
+    this.getCalls += 1;
+    const object = this.objects.get(key);
+    if (!object) throw new Error(`missing object: ${key}`);
+    if (object.bytes.byteLength > maxBytes) throw new RangeError("object exceeds maxBytes");
+    return Uint8Array.from(object.bytes).buffer;
+  }
+
+  async putStream(key, stream, contentLength, options) {
+    if (options.onlyIf.get("If-None-Match") !== "*") throw new Error("missing conditional create");
+    if (this.objects.has(key)) return null;
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks);
+    if (bytes.byteLength !== contentLength) throw new Error("stream length mismatch");
+    this.objects.set(key, {
+      bytes,
+      httpMetadata: options.httpMetadata,
+      customMetadata: options.customMetadata,
+      size: bytes.byteLength,
       uploaded: new Date(),
     });
     return {};
@@ -330,7 +362,7 @@ test("built Node server converts a PNG over HTTP and preserves upload semantics"
   }
 });
 
-test("built Node server stages raw uploads privately", async () => {
+test("built Node server prepares v2 uploads and returns a ThumbHash", async () => {
   const media = new MemoryMediaStorage();
   const staging = new MemoryMediaStorage();
   const port = await findAvailablePort();
@@ -357,9 +389,9 @@ test("built Node server stages raw uploads privately", async () => {
     const ticket = JSON.parse(created.body.toString("utf8"));
     assert.deepEqual(Object.keys(ticket).sort(), ["expiresAt", "id", "uploadUrl"]);
 
-    const rawBytes = Buffer.from("not an image");
+    const rawBytes = PNG_1X1;
     const uploadPath = new URL(ticket.uploadUrl).pathname;
-    const uploaded = await sendHttp(address.port, uploadPath, {
+    const uploadOptions = {
       method: "PUT",
       headers: {
         Host: "internal.example",
@@ -367,15 +399,34 @@ test("built Node server stages raw uploads privately", async () => {
         "Content-Type": "image/png",
       },
       body: rawBytes,
-    });
-    assert.equal(uploaded.statusCode, 201);
-    assert.deepEqual(JSON.parse(uploaded.body.toString("utf8")), { id: ticket.id });
+    };
+    const uploads = await Promise.all([
+      sendHttp(address.port, uploadPath, uploadOptions),
+      sendHttp(address.port, uploadPath, uploadOptions),
+    ]);
+    assert.deepEqual(uploads.map((upload) => upload.statusCode).sort(), [201, 409]);
+    const uploaded = uploads.find((upload) => upload.statusCode === 201);
+    assert(uploaded);
+    const uploadResult = JSON.parse(uploaded.body.toString("utf8"));
+    assert.deepEqual(Object.keys(uploadResult).sort(), ["id", "thumbhash"]);
+    assert.equal(uploadResult.id, ticket.id);
+    assert.equal(Buffer.from(uploadResult.thumbhash, "base64").toString("base64"), uploadResult.thumbhash);
+    const thumbnail = thumbHashToRGBA(Buffer.from(uploadResult.thumbhash, "base64"));
+    assert(thumbnail.w > 0 && thumbnail.h > 0);
 
     const sourceKey = `uploads/${ticket.id}/${ticket.id.slice(2)}`;
     const staged = staging.objects.get(sourceKey);
     assert.deepEqual(staged.bytes, rawBytes);
     assert.deepEqual(staged.httpMetadata, { contentType: "image/png" });
     assert(staged.uploaded instanceof Date);
+    assert.equal(staging.getCalls, 0);
+
+    const prepared = staging.objects.get(`${sourceKey}.webp`);
+    assert(prepared);
+    assert.deepEqual(prepared.httpMetadata, { contentType: "image/webp" });
+    assert.equal(prepared.customMetadata.thumbhash, uploadResult.thumbhash);
+    assert.equal(prepared.bytes.subarray(0, 4).toString("ascii"), "RIFF");
+    assert.equal(prepared.bytes.subarray(8, 12).toString("ascii"), "WEBP");
     assert.equal(media.objects.has(`original/${ticket.id}.webp`), false);
 
     const status = await sendHttp(
@@ -406,12 +457,67 @@ test("built Node server stages raw uploads privately", async () => {
       body: rawBytes,
     });
     assert.equal(duplicate.statusCode, 409);
+    assert.equal(staging.getCalls, 0);
 
     const pending = await sendHttp(address.port, `/v1/uploads/${ticket.id}`, {
       method: "HEAD",
       headers: { Host: "internal.example", Authorization: "Bearer test-api-key" },
     });
     assert.equal(pending.statusCode, 404);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("built Node server rejects invalid v2 images after preserving the private raw upload", async () => {
+  const media = new MemoryMediaStorage();
+  const staging = new MemoryMediaStorage();
+  const port = await findAvailablePort();
+  const server = await startServer(
+    { ...appEnv, PORT: String(port) },
+    media,
+    staging,
+  );
+  try {
+    await once(server, "listening");
+    const address = server.address();
+    assert(address && typeof address === "object");
+
+    const created = await sendHttp(address.port, "/v1/uploads", {
+      method: "POST",
+      headers: {
+        Host: "internal.example",
+        Authorization: "Bearer test-api-key",
+        "Content-Type": "application/json",
+      },
+      body: Buffer.from(JSON.stringify({ staging: true })),
+    });
+    assert.equal(created.statusCode, 201);
+    const ticket = JSON.parse(created.body.toString("utf8"));
+    const invalidPng = Buffer.from(PNG_1X1);
+    invalidPng[41] ^= 0xff;
+    const uploadPath = new URL(ticket.uploadUrl).pathname;
+    const uploaded = await sendHttp(address.port, uploadPath, {
+      method: "PUT",
+      headers: {
+        Host: "internal.example",
+        Origin: "https://app.example.com",
+        "Content-Type": "image/png",
+      },
+      body: invalidPng,
+    });
+    assert.equal(uploaded.statusCode, 422);
+    const uploadError = JSON.parse(uploaded.body.toString("utf8"));
+    assert.equal(uploadError.error.code, "invalid_image");
+    assert.equal("thumbhash" in uploadError, false);
+
+    const sourceKey = `uploads/${ticket.id}/${ticket.id.slice(2)}`;
+    const staged = staging.objects.get(sourceKey);
+    assert.deepEqual(staged.bytes, invalidPng);
+    assert.deepEqual(staged.httpMetadata, { contentType: "image/png" });
+    assert.equal(staging.objects.has(`${sourceKey}.webp`), false);
+    assert.equal(media.objects.has(`original/${ticket.id}.webp`), false);
+    assert.equal(staging.getCalls, 0);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

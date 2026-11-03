@@ -438,7 +438,6 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
         await condition(allHandlersFinished);
         await deleteUploadSource({
           id: validatedInput.id,
-          sourceKey: validatedInput.sourceKey,
           ...(hopeRequestIds.length > 0 ? { hopeRequestIds } : {}),
         });
       });
