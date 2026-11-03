@@ -25,32 +25,25 @@ const uploadIdSchema = z.string().regex(
 const uuidSchema = z.string().regex(
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
 );
-export const uploadStagingKeySchema = z.string().regex(
-  /^uploads\/u_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-);
-
 const processUploadFields = {
   id: uploadIdSchema,
-  sourceKey: uploadStagingKeySchema,
 };
 
-export const processUploadInputSchema = z.object(processUploadFields)
-  .refine((input) => input.sourceKey.split("/")[1] === input.id);
+export const processUploadInputSchema = z.object(processUploadFields);
 
 export const publishPreparedUploadInputSchema = z.object({
   ...processUploadFields,
   hopeRequestId: uuidSchema.optional(),
-}).refine((input) => input.sourceKey.split("/")[1] === input.id);
+});
 
 export const publishUploadInputSchema = z.strictObject({
   id: uploadIdSchema,
 });
 
-export const uploadSourceCleanupInputSchema = z.strictObject({
+export const uploadSourceCleanupInputSchema = z.object({
   id: uploadIdSchema,
-  sourceKey: uploadStagingKeySchema,
   hopeRequestIds: z.array(uuidSchema).optional(),
-}).refine((input) => input.sourceKey.split("/")[1] === input.id);
+});
 
 export const hopeOptionsSchema = z.discriminatedUnion("algorithm", [
   z.strictObject({
@@ -78,7 +71,7 @@ export const hopeProcessingInputSchema = z.object({
     .refine((value) => typeof value === "object" && value !== null &&
       "intensity" in value && typeof value.intensity === "number")
     .pipe(hopeOptionsSchema),
-}).refine((input) => input.sourceKey.split("/")[1] === input.id);
+});
 
 export const applyHopeInputSchema = z.strictObject({
   id: uploadIdSchema,

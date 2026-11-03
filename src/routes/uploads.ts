@@ -12,6 +12,7 @@ import {
 import { HttpError } from "../errors";
 import { validateImageUpload } from "../image-info";
 import { apiKeyAuth } from "../middleware/auth";
+import { uploadSourceKey } from "../prepared-upload";
 import { signUploadToken, verifyUploadToken } from "../token";
 import type { AppEnv } from "../types";
 import {
@@ -121,7 +122,7 @@ uploads.get(
         );
       }
 
-      const object = await c.env.STAGING.head(`uploads/${id}/${id.slice(2)}`);
+      const object = await c.env.STAGING.head(uploadSourceKey(id));
       if (!object) return c.body(null, 404);
 
       const size = object.size;
@@ -173,7 +174,7 @@ uploads.put("/:token", async (c) => {
   if (await c.env.MEDIA.head(key)) {
     throw new HttpError(409, "already_uploaded", "upload URL has already been used");
   }
-  const sourceKey = `uploads/${payload.id}/${payload.id.slice(2)}`;
+  const sourceKey = uploadSourceKey(payload.id);
   if (payload.version === 2 && await uploadStorage.head(sourceKey)) {
     throw new HttpError(409, "already_uploaded", "upload URL has already been used");
   }
@@ -193,7 +194,6 @@ uploads.put("/:token", async (c) => {
     const thumbhash = await c.env.PREPARE_UPLOAD?.(
       {
         id: payload.id,
-        sourceKey,
       },
       input,
     );

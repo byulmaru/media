@@ -12,7 +12,12 @@ import {
 import { HttpError } from "../errors";
 import { validateImageUpload } from "../image-info";
 import { ensurePreparedUpload } from "../prepare-upload.node";
-import { hopePreparedUploadKey, isPreparedUpload, preparedUploadKey } from "../prepared-upload";
+import {
+  hopePreparedUploadKey,
+  isPreparedUpload,
+  preparedUploadKey,
+  uploadSourceKey,
+} from "../prepared-upload";
 import type { R2S3MediaStorage } from "../storage/r2-s3";
 import type { UploadStagingStorage } from "../storage/staging";
 import type {
@@ -218,6 +223,7 @@ export function createHopeProcessingActivities(
     async prepareHopeUpload(rawInput: HopeProcessingInput): Promise<void> {
       const input = parseHopeProcessingInput(rawInput);
       if (!input) throw invalidProcessingInput();
+      const sourceKey = uploadSourceKey(input.id);
 
       const context = Context.current();
       const heartbeatController = new AbortController();
@@ -231,7 +237,7 @@ export function createHopeProcessingActivities(
       }, 4_000);
 
       try {
-        const source = await staging.head(input.sourceKey);
+        const source = await staging.head(sourceKey);
         const lastModified = source?.uploaded;
         signal.throwIfAborted();
         if (
@@ -246,7 +252,7 @@ export function createHopeProcessingActivities(
         if (!Number.isFinite(deadline)) throw invalidUploadSource();
         if (Date.now() >= deadline) throw uploadExpired();
 
-        const key = hopePreparedUploadKey(input.sourceKey, input.requestId);
+        const key = hopePreparedUploadKey(sourceKey, input.requestId);
         const existing = await staging.head(key);
         signal.throwIfAborted();
         if (existing) {
@@ -256,7 +262,7 @@ export function createHopeProcessingActivities(
 
         let sourceBytes: ArrayBuffer;
         try {
-          sourceBytes = await staging.get(input.sourceKey, DEFAULT_MAX_BYTES);
+          sourceBytes = await staging.get(sourceKey, DEFAULT_MAX_BYTES);
         } catch (error) {
           if (error instanceof RangeError) {
             throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
@@ -387,9 +393,10 @@ export function createUploadProcessingActivities(
 ) {
   async function publishPreparedUpload(input: PublishPreparedUploadInput): Promise<ProcessUploadResult> {
     const outputKey = `original/${input.id}.webp`;
+    const sourceKey = uploadSourceKey(input.id);
     const stagingKey = input.hopeRequestId
-      ? hopePreparedUploadKey(input.sourceKey, input.hopeRequestId)
-      : preparedUploadKey(input.sourceKey);
+      ? hopePreparedUploadKey(sourceKey, input.hopeRequestId)
+      : preparedUploadKey(sourceKey);
     const result: ProcessUploadResult = {
       id: input.id,
       url: `${publicBaseUrl}/${outputKey}`,
@@ -426,7 +433,7 @@ export function createUploadProcessingActivities(
       const input = parseProcessUploadInput(rawInput);
       if (!input) throw invalidProcessingInput();
 
-      const lastModified = await staging.headLastModified(input.sourceKey);
+      const lastModified = await staging.headLastModified(uploadSourceKey(input.id));
       if (!(lastModified instanceof Date) || !Number.isFinite(lastModified.getTime())) {
         throw invalidUploadSource();
       }
@@ -473,11 +480,12 @@ export function createUploadProcessingActivities(
     async deleteUploadSource(rawInput: UploadSourceCleanupInput): Promise<void> {
       const input = parseUploadSourceCleanupInput(rawInput);
       if (!input) throw invalidProcessingInput();
+      const sourceKey = uploadSourceKey(input.id);
       for (const requestId of input.hopeRequestIds ?? []) {
-        await staging.delete(hopePreparedUploadKey(input.sourceKey, requestId));
+        await staging.delete(hopePreparedUploadKey(sourceKey, requestId));
       }
-      await staging.delete(preparedUploadKey(input.sourceKey));
-      await staging.delete(input.sourceKey);
+      await staging.delete(preparedUploadKey(sourceKey));
+      await staging.delete(sourceKey);
     },
   };
 }

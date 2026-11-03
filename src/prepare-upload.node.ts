@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_DIMENSION } from "./constants";
 import { HttpError } from "./errors";
 import { validateImageUpload } from "./image-info";
-import { isPreparedUpload, preparedUploadKey } from "./prepared-upload";
+import { isPreparedUpload, preparedUploadKey, uploadSourceKey } from "./prepared-upload";
 import type { UploadStagingStorage } from "./storage/staging";
 import type { ProcessUploadInput } from "./temporal/types";
 import { transcodeUploadImage } from "./temporal/codec";
@@ -13,7 +13,8 @@ export async function ensurePreparedUpload(
   input: ProcessUploadInput,
   sourceBytes?: ArrayBuffer,
 ): Promise<string | undefined> {
-  const key = preparedUploadKey(input.sourceKey);
+  const sourceKey = uploadSourceKey(input.id);
+  const key = preparedUploadKey(sourceKey);
   const existing = await storage.head(key);
   if (existing) {
     if (isPreparedUpload(existing)) return existing.customMetadata?.thumbhash;
@@ -23,7 +24,7 @@ export async function ensurePreparedUpload(
   let bytes = sourceBytes;
   if (bytes === undefined) {
     try {
-      bytes = await storage.get(input.sourceKey, DEFAULT_MAX_BYTES);
+      bytes = await storage.get(sourceKey, DEFAULT_MAX_BYTES);
     } catch (error) {
       if (error instanceof RangeError) {
         throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
@@ -34,7 +35,7 @@ export async function ensurePreparedUpload(
   if (bytes.byteLength > DEFAULT_MAX_BYTES) {
     throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
   }
-  const source = await storage.head(input.sourceKey);
+  const source = await storage.head(sourceKey);
   const info = validateImageUpload(bytes, source?.httpMetadata?.contentType ?? "", {
     maxBytes: DEFAULT_MAX_BYTES,
     maxDimension: DEFAULT_MAX_DIMENSION,

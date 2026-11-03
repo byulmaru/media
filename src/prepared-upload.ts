@@ -1,5 +1,9 @@
 import type { MediaObject } from "./storage";
 
+export function uploadSourceKey(id: string): string {
+  return `uploads/${id}/${id.slice(2)}`;
+}
+
 export function preparedUploadKey(sourceKey: string): string {
   return `${sourceKey}.webp`;
 }

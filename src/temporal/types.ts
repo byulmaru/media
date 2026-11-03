@@ -32,7 +32,6 @@ export const UPLOAD_VALIDATION_CODES = [
 
 export interface ProcessUploadInput {
   id: string;
-  sourceKey: string;
 }
 
 export interface ProcessUploadResult {
@@ -55,7 +54,6 @@ export interface PublishPreparedUploadInput extends ProcessUploadInput {
 
 export interface UploadSourceCleanupInput {
   id: string;
-  sourceKey: string;
   hopeRequestIds?: string[];
 }
 

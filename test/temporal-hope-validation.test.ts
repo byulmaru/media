@@ -8,17 +8,14 @@ import {
   parseHopeProcessingInput,
   parseProcessUploadInput,
   parsePublishPreparedUploadInput,
+  parseUploadSourceCleanupInput,
 } from "../src/temporal/validation";
 
 const uploadId = "u_00000000-0000-4000-8000-000000000000";
 const otherUploadId = "u_00000000-0000-4000-8000-000000000001";
 const requestId = "00000000-0000-4000-8000-000000000001";
 const replyWorkflowId = `media-apply-hope:${uploadId}:${requestId}`;
-const sourceKey = `uploads/${uploadId}/00000000-0000-4000-8000-000000000002`;
-const processUploadInput = {
-  id: uploadId,
-  sourceKey,
-};
+const processUploadInput = { id: uploadId };
 const hopeProcessingInput = {
   ...processUploadInput,
   requestId,
@@ -40,6 +37,7 @@ describe("Temporal upload input validation", () => {
   it.each(parsers)("strips legacy source fields from %s input", (_name, parse, input) => {
     expect(parse({
       ...input,
+      sourceKey: `uploads/${otherUploadId}/00000000-0000-4000-8000-000000000002`,
       contentType: "image/jpeg",
       maxBytes: 1,
       maxDimension: 1,
@@ -66,35 +64,49 @@ describe("applyHope request validation", () => {
 
   it("rejects malformed upload IDs", () => {
     expect(parseApplyHopeInput({ id: "not-an-upload-id", hope: null })).toBeUndefined();
+    expect(parseProcessUploadInput({ id: "not-an-upload-id" })).toBeUndefined();
+    expect(parseHopeProcessingInput({ ...hopeProcessingInput, id: "not-an-upload-id" })).toBeUndefined();
+  });
+
+  it("derives cleanup references from id and strips a mismatched legacy source key", () => {
+    expect(parseUploadSourceCleanupInput({
+      id: uploadId,
+      hopeRequestIds: [requestId],
+      sourceKey: `uploads/${otherUploadId}/00000000-0000-4000-8000-000000000002`,
+    })).toEqual({ id: uploadId, hopeRequestIds: [requestId] });
+    expect(parseUploadSourceCleanupInput({ id: uploadId })).toEqual({ id: uploadId });
   });
 });
 
 describe("prepareHopeUpload input validation", () => {
-  it("accepts a normalized request for the matching source key", () => {
+  it("accepts the normalized id-only request", () => {
     expect(parseHopeProcessingInput({
       id: uploadId,
-      sourceKey,
       requestId,
       maxEdge: 1024,
       hope: { algorithm: "nightshade", iterations: 750, intensity: 0.3 },
     })).toEqual({
       id: uploadId,
-      sourceKey,
       requestId,
       maxEdge: 1024,
       hope: { algorithm: "nightshade", iterations: 750, intensity: 0.3 },
     });
   });
 
+  it("ignores a legacy source key even when it names a different upload", () => {
+    expect(parseHopeProcessingInput({
+      ...hopeProcessingInput,
+      sourceKey: `uploads/${otherUploadId}/00000000-0000-4000-8000-000000000002`,
+    })).toEqual(hopeProcessingInput);
+  });
+
   it.each([
-    ["different source upload", { sourceKey: `uploads/${otherUploadId}/00000000-0000-4000-8000-000000000002` }],
     ["unsupported edge limit", { maxEdge: 2048 }],
     ["unnormalized Hope options", { hope: { algorithm: "noise", iterations: 10 } }],
     ["undefined normalized intensity", { hope: { algorithm: "noise", iterations: 10, intensity: undefined } }],
   ] as const)("rejects %s", (_name, patch) => {
     expect(parseHopeProcessingInput({
       id: uploadId,
-      sourceKey,
       requestId,
       maxEdge: 1024,
       hope: { algorithm: "noise", iterations: 10, intensity: 0.3 },
