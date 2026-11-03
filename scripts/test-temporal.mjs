@@ -1812,7 +1812,7 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
         await hopeGate.promise;
         cancellationSignal.throwIfAborted();
         await staging.putStream(
-          hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId),
+          hopePreparedUploadKey(testSourceKey(activityInput.id), activityInput.requestId),
           Readable.from([protectedWebp]),
           protectedWebp.byteLength,
           {
