@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_DIMENSION } from "./constants";
 import { HttpError } from "./errors";
 import { validateImageUpload } from "./image-info";
 import { isPreparedUpload, preparedUploadKey } from "./prepared-upload";
@@ -33,7 +34,10 @@ export async function ensurePreparedUpload(
   if (bytes.byteLength > input.maxBytes) {
     throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
   }
-  const info = validateImageUpload(bytes, input.contentType, input);
+  const info = validateImageUpload(bytes, input.contentType, {
+    ...input,
+    maxDimension: DEFAULT_MAX_DIMENSION,
+  });
 
   const transformStarted = Date.now();
   const output = await transcodeUploadImage(bytes);

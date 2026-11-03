@@ -53,7 +53,6 @@ function hopeActivityInput(options = {}) {
     sourceKey: options.sourceKey ?? `uploads/${id}/${randomUUID()}`,
     contentType: "image/png",
     maxBytes: DEFAULT_MAX_BYTES,
-    maxDimension: 8192,
     requestId: randomUUID(),
     maxEdge: 1024,
     hope: { algorithm: "nightshade", iterations: 750, intensity: 0.3 },
@@ -396,7 +395,6 @@ function uploadInput(id, sourceKey, contentType = "image/png") {
     sourceKey,
     contentType,
     maxBytes: 1024 * 1024,
-    maxDimension: 8192,
   };
 }
 
@@ -564,11 +562,15 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
   const oriented = newUpload();
   const transparent = newUpload();
+  const legacyTransparentInput = {
+    ...uploadInput(transparent.id, transparent.sourceKey),
+    maxDimension: 1,
+  };
   staging.seed(oriented.sourceKey, JPEG_ORIENTED_2X1);
   staging.seed(transparent.sourceKey, PNG_RGBA_2X1);
 
   await activities.prepareUploadImage(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
-  await activities.prepareUploadImage(uploadInput(transparent.id, transparent.sourceKey));
+  await activities.prepareUploadImage(legacyTransparentInput);
 
   const orientedPrepared = staging.objects.get(preparedKey(oriented.sourceKey));
   const transparentPrepared = staging.objects.get(preparedKey(transparent.sourceKey));
@@ -605,7 +607,7 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert(Math.abs(averageColor.b - colorSums[2] / alphaSum) < 0.05);
   assert(Math.abs(averageColor.a - alphaSum / (sourcePixels.data.length / 4)) < 0.05);
   await activities.prepareUploadImage(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
-  await activities.prepareUploadImage(uploadInput(transparent.id, transparent.sourceKey));
+  await activities.prepareUploadImage(legacyTransparentInput);
   assert.equal(staging.contentReads.get(oriented.sourceKey), 1);
   assert.equal(staging.contentReads.get(transparent.sourceKey), 1);
   assert.equal(staging.objects.get(preparedKey(oriented.sourceKey)).customMetadata.thumbhash, orientedPrepared.customMetadata.thumbhash);
@@ -613,7 +615,7 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert.equal(media.objects.size, 0);
 
   await activities.publishPreparedUpload(uploadInput(oriented.id, oriented.sourceKey, "image/jpeg"));
-  await activities.publishPreparedUpload(uploadInput(transparent.id, transparent.sourceKey));
+  await activities.publishPreparedUpload(legacyTransparentInput);
 
   const orientedImage = media.objects.get(`original/${oriented.id}.webp`);
   assert(orientedImage);
@@ -776,6 +778,45 @@ test("Temporal activity classifies native malformed decodes as non-retryable inv
   assert.equal(media.streams.size, 0);
 });
 
+test("Temporal and Hope source validation keep the fixed dimension cap despite legacy overrides", async () => {
+  const oversizedSource = await sharp({
+    create: { width: 8193, height: 1, channels: 3, background: { r: 18, g: 91, b: 203 } },
+  }).png().toBuffer();
+
+  const upload = newUpload();
+  const uploadStaging = new MemoryStagingStorage();
+  uploadStaging.seed(upload.sourceKey, oversizedSource);
+  const uploadActivities = createUploadProcessingActivities(
+    uploadStaging,
+    new MemoryMediaStorage(),
+    PUBLIC_BASE_URL,
+  );
+  await assert.rejects(
+    uploadActivities.prepareUploadImage({
+      ...uploadInput(upload.id, upload.sourceKey),
+      maxDimension: 16_384,
+    }),
+    (error) => error instanceof ApplicationFailure && error.type === "UploadValidationError" &&
+      error.nonRetryable && error.details?.[0]?.code === "dimension_limit_exceeded",
+  );
+  assert.equal(uploadStaging.objects.has(preparedKey(upload.sourceKey)), false);
+
+  const hope = hopeActivityInput({ maxDimension: 16_384 });
+  const hopeStaging = new MemoryStagingStorage();
+  hopeStaging.seed(hope.sourceKey, oversizedSource);
+  const hopeEnvironment = new MockActivityEnvironment();
+  await assert.rejects(
+    hopeEnvironment.run(createHopeProcessingActivities(
+      hopeStaging,
+      "https://hope.tailnet.example",
+      async () => assert.fail("oversized source must not call Hope"),
+    ).prepareHopeUpload, hope),
+    (error) => error instanceof ApplicationFailure && error.type === "UploadValidationError" &&
+      error.nonRetryable && error.details?.[0]?.code === "dimension_limit_exceeded",
+  );
+  assert.equal(hopeStaging.putStreamKeys.length, 0);
+});
+
 test("Temporal activity destroys an unconsumed WebP stream after a conditional conflict or storage error", async () => {
   const staging = new MemoryStagingStorage();
   const media = new MemoryMediaStorage();
@@ -840,7 +881,7 @@ test("markerless legacy history replays without preparing until publish is signa
   const media = new MemoryMediaStorage();
   const workerFailures = [];
   const source = newUpload();
-  const input = uploadInput(source.id, source.sourceKey);
+  const input = { ...uploadInput(source.id, source.sourceKey), maxDimension: 8192 };
   staging.seed(source.sourceKey, PNG_1X1);
   let worker;
 
@@ -926,7 +967,7 @@ test("prepared-before-wait history replays with the Hope-aware workflow", async 
   const workerFailures = [];
   const previousCalls = { prepare: 0 };
   const source = newUpload();
-  const input = uploadInput(source.id, source.sourceKey);
+  const input = { ...uploadInput(source.id, source.sourceKey), maxDimension: 8192 };
   const defaultKey = preparedKey(source.sourceKey);
   const publicKey = `original/${source.id}.webp`;
   staging.seed(source.sourceKey, PNG_1X1);
@@ -2244,7 +2285,7 @@ test("Hope worker starts with five-second heartbeat throttling and concurrency o
 });
 
 test("Media Hope Activity validates and stores the returned WebP idempotently", async () => {
-  const input = hopeActivityInput();
+  const input = hopeActivityInput({ maxDimension: 1 });
   const staging = new MemoryStagingStorage();
   staging.seed(input.sourceKey, PNG_RGBA_2X1);
   const protectedBytes = await sharp(Buffer.from(PNG_RGBA_2X1)).webp({ quality: 80 }).toBuffer();

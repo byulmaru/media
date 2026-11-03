@@ -196,7 +196,6 @@ uploads.put("/:token", async (c) => {
         sourceKey,
         contentType,
         maxBytes: payload.maxBytes,
-        maxDimension: payload.maxDimension,
       },
       input,
     );

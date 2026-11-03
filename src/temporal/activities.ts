@@ -3,7 +3,12 @@ import { request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
 import sharp from "sharp";
 
-import { DEFAULT_MAX_BYTES, IMMUTABLE_CACHE_CONTROL, MAX_PIXELS } from "../constants";
+import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_DIMENSION,
+  IMMUTABLE_CACHE_CONTROL,
+  MAX_PIXELS,
+} from "../constants";
 import { HttpError } from "../errors";
 import { validateImageUpload } from "../image-info";
 import { ensurePreparedUpload } from "../prepare-upload.node";
@@ -262,7 +267,10 @@ export function createHopeProcessingActivities(
           throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
         }
 
-        const sourceInfo = validateImageUpload(sourceBytes, input.contentType, input);
+        const sourceInfo = validateImageUpload(sourceBytes, input.contentType, {
+          ...input,
+          maxDimension: DEFAULT_MAX_DIMENSION,
+        });
         const sourceMetadata = await decodeImage(Buffer.from(sourceBytes), sourceInfo.format);
         if (sourceMetadata.width !== sourceInfo.width || sourceMetadata.height !== sourceInfo.height) {
           throw new HttpError(422, "invalid_image", "image processing failed");

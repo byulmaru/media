@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_DIMENSION } from "../constants";
+import { DEFAULT_MAX_BYTES } from "../constants";
 import type {
   ProcessUploadInput,
   PublishPreparedUploadInput,
@@ -35,13 +35,12 @@ const processUploadFields = {
   sourceKey: uploadStagingKeySchema,
   contentType: z.enum(["image/jpeg", "image/png", "image/webp"]),
   maxBytes: z.number().int().positive().max(DEFAULT_MAX_BYTES),
-  maxDimension: z.number().int().positive().max(DEFAULT_MAX_DIMENSION),
 };
 
-export const processUploadInputSchema = z.strictObject(processUploadFields)
+export const processUploadInputSchema = z.object(processUploadFields)
   .refine((input) => input.sourceKey.split("/")[1] === input.id);
 
-export const publishPreparedUploadInputSchema = z.strictObject({
+export const publishPreparedUploadInputSchema = z.object({
   ...processUploadFields,
   hopeRequestId: uuidSchema.optional(),
 }).refine((input) => input.sourceKey.split("/")[1] === input.id);
@@ -74,7 +73,7 @@ export const hopeOptionsSchema = z.discriminatedUnion("algorithm", [
   }),
 ]);
 
-export const hopeProcessingInputSchema = z.strictObject({
+export const hopeProcessingInputSchema = z.object({
   ...processUploadFields,
   requestId: uuidSchema,
   maxEdge: z.literal(HOPE_MAX_EDGE),

@@ -35,7 +35,6 @@ export interface ProcessUploadInput {
   sourceKey: string;
   contentType: string;
   maxBytes: number;
-  maxDimension: number;
 }
 
 export interface ProcessUploadResult {
