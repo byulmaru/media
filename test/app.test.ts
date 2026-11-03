@@ -7,6 +7,7 @@ import webpDecodeWasm from "@jsquash/webp/codec/dec/webp_dec.wasm";
 import { app } from "../src/app";
 import type { MediaObject, MediaStorage } from "../src/storage";
 import { inspectImage } from "../src/image-info";
+import { preparedUploadKey } from "../src/prepared-upload";
 import type { Env } from "../src/types";
 import {
   authHeaders,
@@ -201,14 +202,19 @@ describe("media API", () => {
 
   it("authenticates staging metadata reads and omits unusable stored metadata", async () => {
     const id = "u_00000000-0000-4000-8000-000000000000";
+    const sourceKey = `uploads/${id}/${id.slice(2)}`;
+    const preparedKey = preparedUploadKey(sourceKey);
     const lookups: string[] = [];
     let stored: MediaObject | null = { httpMetadata: { contentType: "image/png" } };
-    let storageFailure: Error | null = null;
+    let prepared: MediaObject | null = null;
+    let storageFailure: { key: string; error: Error } | null = null;
     const storage: MediaStorage = {
       async head(key) {
         lookups.push(key);
-        if (storageFailure) throw storageFailure;
-        return stored;
+        if (storageFailure?.key === key) throw storageFailure.error;
+        if (key === sourceKey) return stored;
+        if (key === preparedKey) return prepared;
+        return null;
       },
       async put() {
         throw new Error("staging metadata reads do not write");
@@ -238,7 +244,25 @@ describe("media API", () => {
     expect(incomplete.headers.get("Content-Type")).toBe("image/png");
     expect(incomplete.headers.get("Content-Length")).toBeNull();
     expect(incomplete.headers.get("Last-Modified")).toBeNull();
+    expect(incomplete.headers.get("x-thumbhash")).toBeNull();
     expect(await incomplete.text()).toBe("");
+
+    prepared = { httpMetadata: { contentType: "image/webp" }, size: 1 };
+    const missingHash = await app.request(url, { method: "HEAD", headers: authHeaders }, bindings);
+    expect(missingHash.status).toBe(200);
+    expect(missingHash.headers.get("x-thumbhash")).toBeNull();
+    expect(missingHash.headers.get("Content-Type")).toBe("image/png");
+    expect(await missingHash.text()).toBe("");
+
+    prepared = {
+      httpMetadata: { contentType: "image/webp" },
+      customMetadata: { thumbhash: "AQIDBA==" },
+      size: 1,
+    };
+    const withHash = await app.request(url, { method: "HEAD", headers: authHeaders }, bindings);
+    expect(withHash.status).toBe(200);
+    expect(withHash.headers.get("x-thumbhash")).toBe("AQIDBA==");
+    expect(await withHash.text()).toBe("");
 
     stored = {
       size: -1,
@@ -255,17 +279,28 @@ describe("media API", () => {
     const get = await app.request(url, { headers: authHeaders }, bindings);
     expect(get.status).toBe(405);
     expect(get.headers.get("Allow")).toBe("HEAD");
+    expect(get.headers.get("x-thumbhash")).toBeNull();
     expect(await get.text()).toBe("");
 
-    storageFailure = new Error("R2 unavailable");
-    const failed = await app.request(url, { method: "HEAD", headers: authHeaders }, bindings);
-    expect(failed.status).toBe(500);
-    expect(failed.headers.get("Cache-Control")).toBe("no-store");
-    expect(await failed.text()).toBe("");
+    for (const key of [sourceKey, preparedKey]) {
+      storageFailure = { key, error: new Error("R2 unavailable") };
+      const failed = await app.request(url, { method: "HEAD", headers: authHeaders }, bindings);
+      expect(failed.status).toBe(500);
+      expect(failed.headers.get("Cache-Control")).toBe("no-store");
+      expect(await failed.text()).toBe("");
+    }
     expect(lookups).toEqual([
-      `uploads/${id}/${id.slice(2)}`,
-      `uploads/${id}/${id.slice(2)}`,
-      `uploads/${id}/${id.slice(2)}`,
+      sourceKey,
+      preparedKey,
+      sourceKey,
+      preparedKey,
+      sourceKey,
+      preparedKey,
+      sourceKey,
+      preparedKey,
+      sourceKey,
+      sourceKey,
+      preparedKey,
     ]);
   });
 

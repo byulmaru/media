@@ -2,9 +2,9 @@
 
 JPEG, PNG, WebP 이미지를 검증해 WebP로 정규화하고 Cloudflare R2에 저장하는 업로드 서비스입니다. 같은 API를 Cloudflare Worker와 Node.js 서버로 실행할 수 있습니다. 두 런타임은 같은 R2 bucket과 `original/<id>.webp` 객체 key를 사용하므로 트래픽을 단계적으로 전환할 수 있습니다. 공개 이미지는 `https://media.byulma.run`에서 제공합니다.
 
-기본 v1 HTTP 업로드 경로는 Worker와 Node 서버에서 jSquash codec으로 이미지를 변환해 공개 R2에 저장합니다. Production에서 활성화된 Node.js API의 Version 2 private-staging `PUT`은 원본을 private bucket에 저장한 뒤, 이미 받은 request bytes로 이미지를 검증하고 ThumbHash metadata가 포함된 private WebP를 준비해 `201 { id, thumbhash }`를 반환합니다. 이 단계에서는 원본에 대한 추가 GET을 하지 않습니다. ThumbHash는 최대 100px RGBA thumbnail에서 계산한 base64 값이며 public `original/` 객체, Kosmo DB, GraphQL 또는 UI에 복사하지 않습니다. Sharp는 복제한 pipeline에서 WebP 인코딩과 thumbnail 계산을 병렬로 시작합니다. 이는 한 번만 decode한다고 보장하지 않습니다. Node 전용 optional `PREPARE_UPLOAD` callback을 사용해 Sharp를 Worker bundle에 포함하지 않습니다.
+기본 v1 HTTP 업로드 경로는 Worker와 Node 서버에서 jSquash codec으로 이미지를 변환해 공개 R2에 저장합니다. Production에서 활성화된 Node.js API의 Version 2 private-staging `PUT`은 원본을 private bucket에 저장한 뒤, 이미 받은 request bytes로 이미지를 검증하고 ThumbHash metadata가 포함된 private WebP를 준비해 `201 { id, thumbhash }`를 반환합니다. 이 단계에서는 원본에 대한 추가 GET을 하지 않습니다. ThumbHash는 최대 100px RGBA thumbnail에서 계산한 base64 값이며 server-owned metadata로 private WebP에 저장됩니다. public `original/` 객체에는 복사되지 않고, 인증된 staging `HEAD`가 요청되면 optional header로 노출됩니다. Sharp는 복제한 pipeline에서 WebP 인코딩과 thumbnail 계산을 병렬로 시작합니다. 이는 한 번만 decode한다고 보장하지 않습니다. Node 전용 optional `PREPARE_UPLOAD` callback을 사용해 Sharp를 Worker bundle에 포함하지 않습니다.
 
-Temporal Workflow가 뒤이어 시작되면 기존 prepared WebP를 재사용하고, 입력·결과·대기·취소 계약은 그대로 유지합니다. 배포 전에 시작되어 patch marker가 없는 Temporal history는 replay 호환성을 위해 기존 게시 Activity를 사용하며, 준비 객체가 없으면 그 경로에서 게시 시 인코딩할 수 있습니다. Sharp 내부 buffering은 계속 발생하며, Sharp pipeline 오류는 비재시도 `invalid_image` 검증 오류로 분류합니다. 이미지 검증은 raw PUT이 성공한 뒤에도 `422 invalid_image`로 실패할 수 있습니다. 이 경우 raw object를 되돌리거나 새로운 retry 경로를 만들지 않으며, upload token은 재사용할 수 없습니다. 기존 immutable 동작을 유지하고 raw object의 남은 데이터는 48시간 lifecycle cleanup에 맡깁니다. Raw source의 LastModified와 기존 byte·pixel 제한은 유지됩니다. Worker API가 fallback으로 다시 활성화되면 기존 `{ id }` raw-upload 응답을 유지합니다. v1 응답은 바뀌지 않습니다. 기존 upload metadata `HEAD`/`GET` 동작은 바뀌지 않습니다.
+Temporal Workflow가 뒤이어 시작되면 기존 prepared WebP를 재사용하고, 입력·결과·대기·취소 계약은 그대로 유지합니다. 배포 전에 시작되어 patch marker가 없는 Temporal history는 replay 호환성을 위해 기존 게시 Activity를 사용하며, 준비 객체가 없으면 그 경로에서 게시 시 인코딩할 수 있습니다. Sharp 내부 buffering은 계속 발생하며, Sharp pipeline 오류는 비재시도 `invalid_image` 검증 오류로 분류합니다. 이미지 검증은 raw PUT이 성공한 뒤에도 `422 invalid_image`로 실패할 수 있습니다. 이 경우 raw object를 되돌리거나 새로운 retry 경로를 만들지 않으며, upload token은 재사용할 수 없습니다. 기존 immutable 동작을 유지하고 raw object의 남은 데이터는 48시간 lifecycle cleanup에 맡깁니다. Raw source의 LastModified와 기존 byte·pixel 제한은 유지됩니다. Worker API가 fallback으로 다시 활성화되면 기존 `{ id }` raw-upload 응답을 유지합니다. v1 응답은 바뀌지 않습니다. Raw source HEAD의 metadata headers와 non-staging `GET`은 유지되며, authenticated staging `HEAD`는 준비된 WebP의 server-owned ThumbHash metadata가 있을 때 optional `X-Thumbhash`를 반환합니다.
 
 ## Architecture
 
@@ -259,7 +259,16 @@ Authorization: Bearer <API_KEY>
 - `STAGING` 설정 없음: `503 Service Unavailable`
 - `GET`에 `staging=true` 지정: `405 Method Not Allowed`, body 없음
 
-성공 응답은 `Cache-Control: no-store`를 사용하고, 저장된 object에서 사용할 수 있는 `Content-Length`, `Content-Type`, `Last-Modified`만 보냅니다. metadata가 없거나 유효하지 않은 값이면 해당 헤더를 생략합니다. Kosmo는 필수 metadata가 없는 응답을 terminal validation error로 처리합니다.
+성공 응답은 `Cache-Control: no-store`와 raw source에서 사용할 수 있는 `Content-Length`, `Content-Type`, `Last-Modified`를 보냅니다. 유효한 prepared WebP에 server-owned ThumbHash metadata가 있으면 추가로 다음 optional header를 반환합니다.
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: image/png
+X-Thumbhash: <base64 ThumbHash>
+```
+
+prepared WebP나 ThumbHash metadata가 없으면 `X-Thumbhash`만 생략하고 기존 raw source HEAD 결과는 유지합니다. Raw source metadata가 없거나 유효하지 않으면 해당 헤더도 생략합니다. Kosmo는 필수 raw source metadata가 없는 응답을 terminal validation error로 처리합니다.
 
 ### Check upload completion and resolve its representation
 

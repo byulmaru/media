@@ -442,6 +442,7 @@ test("built Node server prepares v2 uploads and returns a ThumbHash", async () =
     assert.equal(status.headers["content-length"], String(rawBytes.byteLength));
     assert.equal(status.headers["content-type"], "image/png");
     assert.equal(status.headers["last-modified"], staged.uploaded.toUTCString());
+    assert.equal(status.headers["x-thumbhash"], uploadResult.thumbhash);
     assert.equal(status.body.length, 0);
 
     const stagedGet = await sendHttp(address.port, `/v1/uploads/${ticket.id}?staging=true`, {
@@ -525,10 +526,12 @@ test("built Node server rejects invalid v2 images after preserving the private r
 
 test("built Node server omits unavailable staging HEAD metadata", async () => {
   const id = "u_00000000-0000-4000-8000-000000000000";
+  const sourceKey = `uploads/${id}/${id.slice(2)}`;
   const staging = {
     async head(key) {
-      assert.equal(key, `uploads/${id}/${id.slice(2)}`);
-      return { httpMetadata: { contentType: "image/png" } };
+      if (key === sourceKey) return { httpMetadata: { contentType: "image/png" } };
+      assert.equal(key, `${sourceKey}.webp`);
+      return null;
     },
     async put() {
       throw new Error("staging metadata reads do not write");
@@ -553,6 +556,7 @@ test("built Node server omits unavailable staging HEAD metadata", async () => {
     assert.equal(status.headers["content-type"], "image/png");
     assert.equal(status.headers["content-length"], undefined);
     assert.equal(status.headers["last-modified"], undefined);
+    assert.equal(status.headers["x-thumbhash"], undefined);
     assert.equal(status.body.length, 0);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

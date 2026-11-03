@@ -12,7 +12,11 @@ import {
 import { HttpError } from "../errors";
 import { validateImageUpload } from "../image-info";
 import { apiKeyAuth } from "../middleware/auth";
-import { uploadSourceKey } from "../prepared-upload";
+import {
+  isPreparedUpload,
+  preparedUploadKey,
+  uploadSourceKey,
+} from "../prepared-upload";
 import { signUploadToken, verifyUploadToken } from "../token";
 import type { AppEnv } from "../types";
 import {
@@ -122,7 +126,8 @@ uploads.get(
         );
       }
 
-      const object = await c.env.STAGING.head(uploadSourceKey(id));
+      const sourceKey = uploadSourceKey(id);
+      const object = await c.env.STAGING.head(sourceKey);
       if (!object) return c.body(null, 404);
 
       const size = object.size;
@@ -142,6 +147,19 @@ uploads.get(
       if (safeContentType) c.header("Content-Type", safeContentType);
       if (object.uploaded instanceof Date && Number.isFinite(object.uploaded.getTime())) {
         c.header("Last-Modified", object.uploaded.toUTCString());
+      }
+
+      const prepared = await c.env.STAGING.head(preparedUploadKey(sourceKey));
+      const thumbhash = isPreparedUpload(prepared)
+        ? prepared?.customMetadata?.thumbhash
+        : undefined;
+      if (thumbhash) {
+        try {
+          new Headers({ "X-Thumbhash": thumbhash });
+          c.header("X-Thumbhash", thumbhash);
+        } catch {
+          // Omit unusable optional metadata without changing the raw HEAD result.
+        }
       }
       return c.body(null, 200);
     }
