@@ -18,8 +18,6 @@ const sourceKey = `uploads/${uploadId}/00000000-0000-4000-8000-000000000002`;
 const processUploadInput = {
   id: uploadId,
   sourceKey,
-  contentType: "image/png",
-  maxBytes: 16 * 1024 * 1024,
 };
 const hopeProcessingInput = {
   ...processUploadInput,
@@ -35,12 +33,17 @@ describe("Temporal upload input validation", () => {
     ["Hope processing", parseHopeProcessingInput, hopeProcessingInput],
   ] as const;
 
-  it.each(parsers)("accepts %s input without maxDimension", (_name, parse, input) => {
+  it.each(parsers)("accepts %s input", (_name, parse, input) => {
     expect(parse(input)).toEqual(input);
   });
 
-  it.each(parsers)("ignores legacy maxDimension on %s input", (_name, parse, input) => {
-    expect(parse({ ...input, maxDimension: 1 })).toEqual(input);
+  it.each(parsers)("strips legacy source fields from %s input", (_name, parse, input) => {
+    expect(parse({
+      ...input,
+      contentType: "image/jpeg",
+      maxBytes: 1,
+      maxDimension: 1,
+    })).toEqual(input);
   });
 });
 
@@ -71,16 +74,12 @@ describe("prepareHopeUpload input validation", () => {
     expect(parseHopeProcessingInput({
       id: uploadId,
       sourceKey,
-      contentType: "image/png",
-      maxBytes: 16 * 1024 * 1024,
       requestId,
       maxEdge: 1024,
       hope: { algorithm: "nightshade", iterations: 750, intensity: 0.3 },
     })).toEqual({
       id: uploadId,
       sourceKey,
-      contentType: "image/png",
-      maxBytes: 16 * 1024 * 1024,
       requestId,
       maxEdge: 1024,
       hope: { algorithm: "nightshade", iterations: 750, intensity: 0.3 },
@@ -96,8 +95,6 @@ describe("prepareHopeUpload input validation", () => {
     expect(parseHopeProcessingInput({
       id: uploadId,
       sourceKey,
-      contentType: "image/png",
-      maxBytes: 16 * 1024 * 1024,
       requestId,
       maxEdge: 1024,
       hope: { algorithm: "noise", iterations: 10, intensity: 0.3 },

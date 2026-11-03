@@ -231,7 +231,8 @@ export function createHopeProcessingActivities(
       }, 4_000);
 
       try {
-        const lastModified = await staging.headLastModified(input.sourceKey);
+        const source = await staging.head(input.sourceKey);
+        const lastModified = source?.uploaded;
         signal.throwIfAborted();
         if (
           !(lastModified instanceof Date) ||
@@ -255,7 +256,7 @@ export function createHopeProcessingActivities(
 
         let sourceBytes: ArrayBuffer;
         try {
-          sourceBytes = await staging.get(input.sourceKey, input.maxBytes);
+          sourceBytes = await staging.get(input.sourceKey, DEFAULT_MAX_BYTES);
         } catch (error) {
           if (error instanceof RangeError) {
             throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
@@ -263,14 +264,18 @@ export function createHopeProcessingActivities(
           throw error;
         }
         signal.throwIfAborted();
-        if (sourceBytes.byteLength > input.maxBytes) {
+        if (sourceBytes.byteLength > DEFAULT_MAX_BYTES) {
           throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
         }
 
-        const sourceInfo = validateImageUpload(sourceBytes, input.contentType, {
-          ...input,
-          maxDimension: DEFAULT_MAX_DIMENSION,
-        });
+        const sourceInfo = validateImageUpload(
+          sourceBytes,
+          source?.httpMetadata?.contentType ?? "",
+          {
+            maxBytes: DEFAULT_MAX_BYTES,
+            maxDimension: DEFAULT_MAX_DIMENSION,
+          },
+        );
         const sourceMetadata = await decodeImage(Buffer.from(sourceBytes), sourceInfo.format);
         if (sourceMetadata.width !== sourceInfo.width || sourceMetadata.height !== sourceInfo.height) {
           throw new HttpError(422, "invalid_image", "image processing failed");

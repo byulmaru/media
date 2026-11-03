@@ -194,8 +194,6 @@ uploads.put("/:token", async (c) => {
       {
         id: payload.id,
         sourceKey,
-        contentType,
-        maxBytes: payload.maxBytes,
       },
       input,
     );

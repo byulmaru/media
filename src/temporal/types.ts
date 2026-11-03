@@ -33,8 +33,6 @@ export const UPLOAD_VALIDATION_CODES = [
 export interface ProcessUploadInput {
   id: string;
   sourceKey: string;
-  contentType: string;
-  maxBytes: number;
 }
 
 export interface ProcessUploadResult {

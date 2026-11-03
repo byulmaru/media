@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import { DEFAULT_MAX_BYTES } from "../constants";
 import type {
   ProcessUploadInput,
   PublishPreparedUploadInput,
@@ -33,8 +32,6 @@ export const uploadStagingKeySchema = z.string().regex(
 const processUploadFields = {
   id: uploadIdSchema,
   sourceKey: uploadStagingKeySchema,
-  contentType: z.enum(["image/jpeg", "image/png", "image/webp"]),
-  maxBytes: z.number().int().positive().max(DEFAULT_MAX_BYTES),
 };
 
 export const processUploadInputSchema = z.object(processUploadFields)
