@@ -67,6 +67,13 @@ const digitsOnlyPortSchema = z
   .transform(Number)
   .pipe(z.number().int().min(1).max(65535));
 
+const hopeConcurrencySchema = z
+  .string()
+  .regex(/^\d+$/)
+  .default("1")
+  .transform(Number)
+  .pipe(z.number().int().positive().refine(Number.isSafeInteger));
+
 export const nodeServerConfigSchema = z.object({
   API_KEY: nonWhitespaceNodeValueSchema,
   UPLOAD_SIGNING_SECRET: nonWhitespaceNodeValueSchema.pipe(z.string().min(32)),
@@ -93,6 +100,7 @@ export const temporalUploadConfigSchema = z.object({
   AWS_SECRET_ACCESS_KEY: nonWhitespaceNodeValueSchema,
   R2_STAGING_BUCKET_NAME: nonWhitespaceNodeValueSchema,
   HOPE_API_URL: hopeApiUrlSchema.optional(),
+  HOPE_CONCURRENCY: hopeConcurrencySchema,
 })
   .refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME);
 

@@ -2836,17 +2836,17 @@ test("worker group waits for all workers after a shared shutdown signal", async 
   assert.equal(closed, true);
 });
 
-test("Hope worker starts with five-second heartbeat throttling and concurrency one", async () => {
+test("Hope worker uses configured concurrency without changing upload worker capacity", async () => {
   const originalConnect = NativeConnection.connect;
   const originalCreate = Worker.create;
   const options = [];
-  NativeConnection.connect = async () => ({ close: async () => {} });
+  let connectionCount = 0;
   Worker.create = async (workerOptions) => {
     options.push(workerOptions);
     return { run: async () => {}, runUntil: async () => {}, shutdown() {} };
   };
   try {
-    await startConfiguredWorker({
+    const source = {
       TEMPORAL_ADDRESS: "localhost:7233",
       TEMPORAL_NAMESPACE: "media",
       TEMPORAL_TASK_QUEUE: "media-upload",
@@ -2857,16 +2857,32 @@ test("Hope worker starts with five-second heartbeat throttling and concurrency o
       AWS_ACCESS_KEY_ID: "test-access-key",
       AWS_SECRET_ACCESS_KEY: "test-secret-key",
       HOPE_API_URL: "https://hope.example",
-    });
+    };
+    NativeConnection.connect = async () => {
+      connectionCount += 1;
+      return { close: async () => {} };
+    };
+    await startConfiguredWorker({ ...source, HOPE_CONCURRENCY: "3" });
+    await startConfiguredWorker(source);
+    const connectedBeforeInvalidConfig = connectionCount;
+    await assert.rejects(
+      startConfiguredWorker({ ...source, HOPE_CONCURRENCY: "0" }),
+      /configuration is incomplete/,
+    );
+    assert.equal(connectionCount, connectedBeforeInvalidConfig);
   } finally {
     NativeConnection.connect = originalConnect;
     Worker.create = originalCreate;
   }
-  assert.equal(options.length, 2);
+  assert.equal(options.length, 4);
+  assert.equal(options[0].maxConcurrentActivityTaskExecutions, 4);
   assert.equal(options[1].taskQueue, HOPE_TASK_QUEUE);
-  assert.equal(options[1].maxConcurrentActivityTaskExecutions, 1);
+  assert.equal(options[1].maxConcurrentActivityTaskExecutions, 3);
   assert.equal(options[1].maxHeartbeatThrottleInterval, "5 seconds");
   assert.equal(options[1].defaultHeartbeatThrottleInterval, "5 seconds");
+  assert.equal(options[2].maxConcurrentActivityTaskExecutions, 4);
+  assert.equal(options[3].taskQueue, HOPE_TASK_QUEUE);
+  assert.equal(options[3].maxConcurrentActivityTaskExecutions, 1);
 });
 
 test("Media Hope Activity validates and stores the returned WebP idempotently", async () => {

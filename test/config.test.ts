@@ -73,12 +73,27 @@ describe("Temporal upload configuration", () => {
   };
 
   it("accepts complete nonblank config and keeps staging private from the public bucket", () => {
-    expect(temporalUploadConfigSchema.safeParse(config).success).toBe(true);
+    const parsed = temporalUploadConfigSchema.safeParse(config);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.HOPE_CONCURRENCY).toBe(1);
     expect(temporalUploadConfigSchema.safeParse({
       ...config,
       R2_STAGING_BUCKET_NAME: config.R2_BUCKET_NAME,
     }).success).toBe(false);
   });
+
+  it("accepts a positive safe-integer Hope concurrency", () => {
+    const parsed = temporalUploadConfigSchema.safeParse({ ...config, HOPE_CONCURRENCY: "3" });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.HOPE_CONCURRENCY).toBe(3);
+  });
+
+  it.each(["", "0", "-1", "1.5", "Infinity", "9007199254740992"])(
+    "rejects invalid Hope concurrency %s",
+    (HOPE_CONCURRENCY) => {
+      expect(temporalUploadConfigSchema.safeParse({ ...config, HOPE_CONCURRENCY }).success).toBe(false);
+    },
+  );
 
   it("enables the optional Hope poller with an HTTPS origin alone", () => {
     expect(temporalUploadConfigSchema.safeParse({

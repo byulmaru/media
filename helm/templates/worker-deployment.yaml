@@ -58,6 +58,8 @@ spec:
               value: {{ .Values.temporal.taskQueue | quote }}
             - name: HOPE_ENABLED
               value: {{ .Values.hope.enabled | quote }}
+            - name: HOPE_CONCURRENCY
+              value: {{ .Values.hope.concurrency | quote }}
 {{ with .Values.hope.apiUrl }}
             - name: HOPE_API_URL
               value: {{ . | quote }}

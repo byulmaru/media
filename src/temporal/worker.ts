@@ -93,7 +93,7 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
           staging,
           config.HOPE_API_URL,
         ),
-        maxConcurrentActivityTaskExecutions: 1,
+        maxConcurrentActivityTaskExecutions: config.HOPE_CONCURRENCY,
         maxHeartbeatThrottleInterval: "5 seconds",
         defaultHeartbeatThrottleInterval: "5 seconds",
       }));

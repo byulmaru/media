@@ -21,6 +21,7 @@ temporal:
 hope:
   enabled: true
   apiUrl: ""
+  concurrency: 1
 
 worker:
   hostAliases: []
