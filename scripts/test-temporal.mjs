@@ -274,6 +274,7 @@ class MemoryMediaStorage {
   failAfterCommitKey;
   failStreamKey;
   failStreamError;
+  putGate;
   conflictKey;
   conflictHeadMisses = 0;
 
@@ -310,6 +311,10 @@ class MemoryMediaStorage {
     for await (const chunk of body) chunks.push(Buffer.from(chunk));
     const bytes = Buffer.concat(chunks);
     assert.equal(bytes.byteLength, contentLength);
+    if (this.putGate?.key === key) {
+      this.putGate.started();
+      await this.putGate.promise;
+    }
     this.objects.set(key, {
       bytes,
       httpMetadata: options.httpMetadata,
@@ -533,6 +538,14 @@ async function startPublishCaller(environment, endpoint, id, workflowId) {
     workflowId,
     taskQueue: TASK_QUEUE,
     args: [endpoint, id],
+  });
+}
+
+async function startPublishUploadV2Caller(environment, endpoint, input, workflowId, timeout = "25 hours") {
+  return environment.client.workflow.start("nexusPublishUploadV2CallerWorkflow", {
+    workflowId,
+    taskQueue: TASK_QUEUE,
+    args: [endpoint, input, timeout],
   });
 }
 
@@ -1582,6 +1595,466 @@ test("Nexus upload operations wait, publish idempotently, and clean up terminal 
       [preparedKey(cancelled.sourceKey), cancelled.sourceKey],
     );
     assert.equal(media.putCounts.get(`original/${cancelled.id}.webp`) ?? 0, 0);
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
+test("Nexus publishUploadV2 waits for public completion and shares an unfiltered selection", async () => {
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const endpointName = "media-publish-v2-false-test-" + randomUUID();
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
+  const publicationStarted = deferred();
+  const publicationGate = deferred();
+  let worker;
+
+  try {
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      undefined,
+      [createMediaServiceHandler({ hopeEnabled: true })],
+    );
+
+    const source = newUpload();
+    const publicKey = `original/${source.id}.webp`;
+    staging.seed(source.sourceKey, PNG_1X1);
+    const uploadCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(source.id, source.sourceKey),
+      `publish-v2-false-upload:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(environment, staging, source.id, source.sourceKey);
+    media.putGate = {
+      key: publicKey,
+      started: publicationStarted.resolve,
+      promise: publicationGate.promise,
+    };
+
+    const publishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, compatibilityField: "ignored" },
+      `publish-v2-false:${randomUUID()}`,
+      "5 seconds",
+    );
+    const publishOutcomePromise = publishCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await withTimeout(publicationStarted.promise, WORKFLOW_TIMEOUT_MS, "public write did not start");
+    assert.equal(media.objects.has(publicKey), false);
+    assert.equal(await Promise.race([
+      publishOutcomePromise.then(() => true),
+      delay(0).then(() => false),
+    ]), false, "publishUploadV2 completed before public storage succeeded");
+
+    const duplicatePublishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, applyAiProhibitFilter: false },
+      `publish-v2-false-duplicate:${randomUUID()}`,
+      "5 seconds",
+    );
+    const conflictingPublishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, applyAiProhibitFilter: true },
+      `publish-v2-conflict:${randomUUID()}`,
+      "5 seconds",
+    );
+    const conflictResult = await withTimeout(
+      conflictingPublishCaller.result(),
+      5_000,
+      "different publication choice did not reject",
+    );
+    assert.match(conflictResult.error, /MediaUploadSelectionConflict/);
+
+    publicationGate.resolve();
+    const expectedResult = {
+      status: "completed",
+      id: source.id,
+      url: `${PUBLIC_BASE_URL}/${publicKey}`,
+      mediaType: "image/webp",
+    };
+    assert.deepEqual(await withTimeout(publishCaller.result(), WORKFLOW_TIMEOUT_MS, "publication result did not finish"), {
+      result: expectedResult,
+    });
+    assert.deepEqual(await withTimeout(
+      duplicatePublishCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "same publication choice did not reuse the result",
+    ), { result: expectedResult });
+    assert.deepEqual(await withTimeout(uploadCaller.result(), WORKFLOW_TIMEOUT_MS, "startUpload did not finish"), {
+      upload: {
+        id: source.id,
+        url: `${PUBLIC_BASE_URL}/${publicKey}`,
+        mediaType: "image/webp",
+      },
+      publishResults: [],
+    });
+    assert.equal(media.putCounts.get(publicKey), 1);
+
+    const failingSource = newUpload();
+    const failingPublicKey = `original/${failingSource.id}.webp`;
+    staging.seed(failingSource.sourceKey, PNG_1X1);
+    const failingUploadCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(failingSource.id, failingSource.sourceKey),
+      `publish-v2-failed-upload:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(
+      environment,
+      staging,
+      failingSource.id,
+      failingSource.sourceKey,
+    );
+    media.failStreamKey = failingPublicKey;
+    media.failStreamError = ApplicationFailure.create({
+      message: "injected terminal publication failure",
+      type: "UploadProcessingInputError",
+      nonRetryable: true,
+    });
+    const failedPublishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: failingSource.id, applyAiProhibitFilter: false },
+      `publish-v2-failed:${randomUUID()}`,
+      "5 seconds",
+    );
+    const failedPublishResult = await withTimeout(
+      failedPublishCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "failed publication result did not settle",
+    );
+    assert.match(failedPublishResult.error, /UploadProcessingInputError/);
+    assert.equal(media.objects.has(failingPublicKey), false);
+    const failedUploadResult = await withTimeout(
+      failingUploadCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "failed upload result did not settle",
+    );
+    assert.match(failedUploadResult.error, /injected terminal publication failure/i);
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    publicationGate.resolve();
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
+test("Nexus publishUploadV2 returns processing for an immutable filtered selection", async () => {
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const endpointName = "media-publish-v2-hope-test-" + randomUUID();
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
+  const hopeStarted = deferred();
+  const hopeGate = deferred();
+  const failureHopeStarted = deferred();
+  const failureHopeGate = deferred();
+  const protectedWebp = await sharp({
+    create: { width: 1, height: 1, channels: 3, background: { r: 240, g: 25, b: 135 } },
+  }).webp().toBuffer();
+  const failingSource = newUpload();
+  let worker;
+  let hopeWorker;
+
+  try {
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      undefined,
+      [createMediaServiceHandler({ hopeEnabled: true })],
+    );
+    hopeWorker = await startHopeWorker(
+      environment,
+      async (activityInput, cancellationSignal) => {
+        if (activityInput.id === failingSource.id) {
+          failureHopeStarted.resolve(activityInput);
+          await failureHopeGate.promise;
+          cancellationSignal.throwIfAborted();
+          throw ApplicationFailure.create({
+            message: "injected terminal Hope failure",
+            type: HOPE_PROCESSING_ERROR_TYPE,
+            nonRetryable: true,
+          });
+        }
+        hopeStarted.resolve(activityInput);
+        await hopeGate.promise;
+        cancellationSignal.throwIfAborted();
+        await staging.putStream(
+          hopePreparedUploadKey(activityInput.sourceKey, activityInput.requestId),
+          Readable.from([protectedWebp]),
+          protectedWebp.byteLength,
+          {
+            onlyIf: new Headers({ "If-None-Match": "*" }),
+            httpMetadata: { contentType: "image/webp" },
+          },
+        );
+      },
+      workerFailures,
+    );
+
+    const source = newUpload();
+    const input = uploadInput(source.id, source.sourceKey);
+    const defaultKey = preparedKey(source.sourceKey);
+    const publicKey = `original/${source.id}.webp`;
+    staging.seed(source.sourceKey, PNG_1X1);
+    const uploadCaller = await startCaller(
+      environment,
+      endpointName,
+      input,
+      `publish-v2-hope-upload:${randomUUID()}`,
+    );
+    const uploadOutcomePromise = uploadCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await awaitUploadWorkflowWaiting(environment, staging, source.id, source.sourceKey);
+    const defaultBytes = Buffer.from(staging.objects.get(defaultKey).bytes);
+
+    const publishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, applyAiProhibitFilter: true },
+      `publish-v2-hope:${randomUUID()}`,
+      "5 seconds",
+    );
+    assert.deepEqual(await withTimeout(
+      publishCaller.result(),
+      5_000,
+      "filtered publication did not report accepted processing",
+    ), { result: { status: "processing", id: source.id } });
+    const scheduledHope = await withTimeout(
+      hopeStarted.promise,
+      WORKFLOW_TIMEOUT_MS,
+      "filtered publication did not schedule Hope",
+    );
+    assert.deepEqual(scheduledHope.hope, {
+      algorithm: "glaze",
+      iterations: 450,
+      intensity: 0.3,
+    });
+    assert.equal(media.putCounts.get(publicKey) ?? 0, 0);
+    assert.equal(await Promise.race([
+      uploadOutcomePromise.then(() => true),
+      delay(0).then(() => false),
+    ]), false, "startUpload completed before the filtered artifact was ready");
+
+    const duplicatePublishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, applyAiProhibitFilter: true },
+      `publish-v2-hope-duplicate:${randomUUID()}`,
+      "5 seconds",
+    );
+    assert.deepEqual(await withTimeout(
+      duplicatePublishCaller.result(),
+      5_000,
+      "same filtered selection did not report processing",
+    ), { result: { status: "processing", id: source.id } });
+    const conflictingPublishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, applyAiProhibitFilter: false },
+      `publish-v2-hope-conflict:${randomUUID()}`,
+      "5 seconds",
+    );
+    const conflictResult = await withTimeout(
+      conflictingPublishCaller.result(),
+      5_000,
+      "unfiltered choice did not reject after filtered selection",
+    );
+    assert.match(conflictResult.error, /MediaUploadSelectionConflict/);
+    const oldHopeCaller = await startApplyHopeCaller(
+      environment,
+      endpointName,
+      { id: source.id, hope: { algorithm: "noise", iterations: 8 } },
+      `publish-v2-hope-old-api:${randomUUID()}`,
+      "5 seconds",
+    );
+    assert.match((await withTimeout(oldHopeCaller.result(), 5_000, "legacy Hope request did not reject")).error, /Upload publication has started/i);
+
+    hopeGate.resolve();
+    const uploadOutcome = await withTimeout(
+      uploadOutcomePromise,
+      WORKFLOW_TIMEOUT_MS,
+      "filtered upload did not finish",
+    );
+    assert.equal(uploadOutcome.error, undefined);
+    const uploadResult = uploadOutcome.value;
+    assert.deepEqual(uploadResult.upload, {
+      id: source.id,
+      url: `${PUBLIC_BASE_URL}/${publicKey}`,
+      mediaType: "image/webp",
+    });
+    assert.deepEqual(media.objects.get(publicKey).bytes, protectedWebp);
+    assert.notDeepEqual(media.objects.get(publicKey).bytes, defaultBytes);
+
+    staging.seed(failingSource.sourceKey, PNG_1X1);
+    const failingPublicKey = `original/${failingSource.id}.webp`;
+    const failingUploadCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(failingSource.id, failingSource.sourceKey),
+      `publish-v2-hope-failure-upload:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(
+      environment,
+      staging,
+      failingSource.id,
+      failingSource.sourceKey,
+    );
+    const failingPublishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: failingSource.id, applyAiProhibitFilter: true },
+      `publish-v2-hope-failure:${randomUUID()}`,
+      "5 seconds",
+    );
+    assert.deepEqual(await withTimeout(
+      failingPublishCaller.result(),
+      5_000,
+      "failed filtered publication did not first report processing",
+    ), { result: { status: "processing", id: failingSource.id } });
+    await withTimeout(
+      failureHopeStarted.promise,
+      WORKFLOW_TIMEOUT_MS,
+      "terminal Hope activity did not start",
+    );
+    const failureConflictCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: failingSource.id, applyAiProhibitFilter: false },
+      `publish-v2-hope-failure-conflict:${randomUUID()}`,
+      "5 seconds",
+    );
+    assert.match((await withTimeout(
+      failureConflictCaller.result(),
+      5_000,
+      "conflicting false request did not reject",
+    )).error, /MediaUploadSelectionConflict/);
+    assert.equal(media.putCounts.get(failingPublicKey) ?? 0, 0);
+    failureHopeGate.resolve();
+    const failingUploadResult = await withTimeout(
+      failingUploadCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "failed filtered upload did not settle",
+    );
+    assert.match(failingUploadResult.error, /injected terminal Hope failure/i);
+    assert.equal(media.objects.has(failingPublicKey), false);
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    hopeGate.resolve();
+    failureHopeGate.resolve();
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    if (hopeWorker) await stopWorker(hopeWorker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
+test("Nexus publishUploadV2 rejects unsupported filtering and leaves legacy publish intact", async () => {
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const endpointName = "media-publish-v2-unsupported-test-" + randomUUID();
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
+  let worker;
+
+  try {
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      undefined,
+      [createMediaServiceHandler()],
+    );
+    const source = newUpload();
+    const publicKey = `original/${source.id}.webp`;
+    staging.seed(source.sourceKey, PNG_1X1);
+    const uploadCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(source.id, source.sourceKey),
+      `publish-v2-unsupported-upload:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(environment, staging, source.id, source.sourceKey);
+    const publishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, applyAiProhibitFilter: true },
+      `publish-v2-unsupported:${randomUUID()}`,
+      "5 seconds",
+    );
+    const unsupported = await withTimeout(
+      publishCaller.result(),
+      5_000,
+      "unsupported Hope request did not reject",
+    );
+    assert.match(unsupported.error, /Hope updates are not supported for this upload/i);
+    assert.equal(media.putCounts.get(publicKey) ?? 0, 0);
+    const uploadHistory = await environment.client.workflow
+      .getHandle(`media-upload:${source.id}`)
+      .fetchHistory();
+    assert.equal(uploadHistory.events.some(
+      (event) => event.workflowExecutionSignaledEventAttributes?.signalName === "publishUploadV2Request",
+    ), false, "unsupported Hope was rejected before signaling the upload workflow");
+
+    const legacyPublish = await startPublishCaller(
+      environment,
+      endpointName,
+      source.id,
+      `publish-v2-unsupported-legacy:${randomUUID()}`,
+    );
+    assert.deepEqual(await withTimeout(legacyPublish.result(), 5_000, "legacy publish acknowledgement changed"), {
+      result: { id: source.id },
+    });
+    const uploadResult = await withTimeout(uploadCaller.result(), WORKFLOW_TIMEOUT_MS, "legacy publication did not finish");
+    assert.deepEqual(uploadResult.upload, {
+      id: source.id,
+      url: `${PUBLIC_BASE_URL}/${publicKey}`,
+      mediaType: "image/webp",
+    });
+    assert.equal(media.putCounts.get(publicKey), 1);
     assert.deepEqual(workerFailures, []);
   } finally {
     if (worker) await stopWorker(worker).catch(() => undefined);

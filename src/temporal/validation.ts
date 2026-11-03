@@ -4,11 +4,17 @@ import type {
   ProcessUploadInput,
   PublishPreparedUploadInput,
   PublishUploadInput,
+  NormalizedPublishUploadV2Input,
+  PublishUploadV2WorkflowInput,
+  PublishUploadV2RequestEnvelope,
+  PublishUploadV2RequestSignal,
+  PublishUploadV2WorkflowReply,
   NormalizedHopeOptions,
   ApplyHopeResult,
   ApplyHopeRequestEnvelope,
   ApplyHopeRequestSignal,
   ApplyHopeWorkflowReply,
+  PublishUploadV2WorkflowFailure,
   HopeProcessingInput,
   UploadSourceCleanupInput,
 } from "./types";
@@ -16,7 +22,10 @@ import {
   HOPE_MAX_EDGE,
   HOPE_REPLY_WORKFLOW_ID_MAX_LENGTH,
   APPLY_HOPE_REPLY_ERROR_TYPES,
+  PUBLISH_UPLOAD_V2_REPLY_ERROR_TYPES,
   APPLY_HOPE_WORKFLOW_ID_PREFIX,
+  PUBLISH_UPLOAD_V2_REPLY_WORKFLOW_ID_MAX_LENGTH,
+  PUBLISH_UPLOAD_V2_WORKFLOW_ID_PREFIX,
 } from "./types";
 
 const uploadIdSchema = z.string().regex(
@@ -38,6 +47,15 @@ export const publishPreparedUploadInputSchema = z.object({
 
 export const publishUploadInputSchema = z.strictObject({
   id: uploadIdSchema,
+});
+
+export const publishUploadV2InputSchema = z.object({
+  id: uploadIdSchema,
+  applyAiProhibitFilter: z.boolean().default(false),
+});
+
+export const publishUploadV2WorkflowInputSchema = publishUploadV2InputSchema.extend({
+  hopeEnabled: z.boolean(),
 });
 
 export const uploadSourceCleanupInputSchema = z.object({
@@ -100,6 +118,42 @@ const applyHopeWorkflowReplySchema = z.union([
   }),
 ]);
 
+const publishUploadV2RequestEnvelopeSchema = z.object({
+  requestId: uuidSchema,
+  replyWorkflowId: z.string().min(1).max(PUBLISH_UPLOAD_V2_REPLY_WORKFLOW_ID_MAX_LENGTH),
+});
+
+const publishUploadV2RequestSignalSchema = z.object({
+  requestId: uuidSchema,
+  replyWorkflowId: z.string().min(1).max(PUBLISH_UPLOAD_V2_REPLY_WORKFLOW_ID_MAX_LENGTH),
+  applyAiProhibitFilter: z.boolean(),
+});
+
+const publishUploadV2WorkflowReplySchema = z.union([
+  z.object({
+    requestId: uuidSchema,
+    result: z.union([
+      z.object({
+        status: z.literal("completed"),
+        id: uploadIdSchema,
+        url: z.string().min(1),
+        mediaType: z.literal("image/webp"),
+      }),
+      z.object({
+        status: z.literal("processing"),
+        id: uploadIdSchema,
+      }),
+    ]),
+  }),
+  z.object({
+    requestId: uuidSchema,
+    error: z.object({
+      type: z.enum(PUBLISH_UPLOAD_V2_REPLY_ERROR_TYPES),
+      message: z.string().min(1).max(200),
+    }),
+  }),
+]);
+
 export function parseProcessUploadInput(input: unknown): ProcessUploadInput | undefined {
   const parsed = processUploadInputSchema.safeParse(input);
   return parsed.success ? parsed.data : undefined;
@@ -114,6 +168,20 @@ export function parsePublishPreparedUploadInput(
 
 export function parsePublishUploadInput(input: unknown): PublishUploadInput | undefined {
   const parsed = publishUploadInputSchema.safeParse(input);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function parsePublishUploadV2Input(
+  input: unknown,
+): NormalizedPublishUploadV2Input | undefined {
+  const parsed = publishUploadV2InputSchema.safeParse(input);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function parsePublishUploadV2WorkflowInput(
+  input: unknown,
+): PublishUploadV2WorkflowInput | undefined {
+  const parsed = publishUploadV2WorkflowInputSchema.safeParse(input);
   return parsed.success ? parsed.data : undefined;
 }
 
@@ -144,6 +212,47 @@ function isApplyHopeReplyWorkflowId(uploadId: string, workflowId: string): boole
   const suffix = workflowId.slice(prefix.length);
   return workflowId.startsWith(prefix) && suffix.length > 0 &&
     /^(?:[A-Za-z0-9_.!~*'()-]|%[0-9a-f]{2})+$/i.test(suffix);
+}
+
+function isPublishUploadV2ReplyWorkflowId(uploadId: string, workflowId: string): boolean {
+  const prefix = `${PUBLISH_UPLOAD_V2_WORKFLOW_ID_PREFIX}${uploadId}:`;
+  const suffix = workflowId.slice(prefix.length);
+  return workflowId.startsWith(prefix) && suffix.length > 0 &&
+    /^(?:[A-Za-z0-9_.!~*'()-]|%[0-9a-f]{2})+$/i.test(suffix);
+}
+
+export function parsePublishUploadV2RequestEnvelope(
+  uploadId: string,
+  input: unknown,
+): PublishUploadV2RequestEnvelope | undefined {
+  const parsed = publishUploadV2RequestEnvelopeSchema.safeParse(input);
+  return parsed.success && isPublishUploadV2ReplyWorkflowId(uploadId, parsed.data.replyWorkflowId)
+    ? parsed.data
+    : undefined;
+}
+
+export function parsePublishUploadV2RequestSignal(
+  uploadId: string,
+  input: unknown,
+): PublishUploadV2RequestSignal | undefined {
+  const parsed = publishUploadV2RequestSignalSchema.safeParse(input);
+  return parsed.success && isPublishUploadV2ReplyWorkflowId(uploadId, parsed.data.replyWorkflowId)
+    ? parsed.data
+    : undefined;
+}
+
+export function parsePublishUploadV2WorkflowReply(
+  uploadId: string,
+  requestId: string,
+  input: unknown,
+): PublishUploadV2WorkflowReply | undefined {
+  const parsed = publishUploadV2WorkflowReplySchema.safeParse(input);
+  if (!parsed.success || parsed.data.requestId !== requestId) return undefined;
+  if ("error" in parsed.data) return parsed.data as {
+    requestId: string;
+    error: PublishUploadV2WorkflowFailure;
+  };
+  return parsed.data.result.id === uploadId ? parsed.data : undefined;
 }
 
 export function parseApplyHopeRequestEnvelope(

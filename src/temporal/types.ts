@@ -1,5 +1,10 @@
 export const PROCESS_UPLOAD_WORKFLOW_TYPE = "processUploadWorkflow";
 export const PUBLISH_UPLOAD_SIGNAL_NAME = "publishUpload";
+export const PUBLISH_UPLOAD_V2_WORKFLOW_TYPE = "publishUploadV2Workflow";
+export const PUBLISH_UPLOAD_V2_WORKFLOW_ID_PREFIX = "media-publish-upload-v2:";
+export const PUBLISH_UPLOAD_V2_REQUEST_SIGNAL_NAME = "publishUploadV2Request";
+export const PUBLISH_UPLOAD_V2_RESULT_SIGNAL_NAME = "publishUploadV2Result";
+export const PUBLISH_UPLOAD_V2_REPLY_WORKFLOW_ID_MAX_LENGTH = 512;
 export const APPLY_HOPE_WORKFLOW_TYPE = "applyHopeWorkflow";
 export const APPLY_HOPE_WORKFLOW_ID_PREFIX = "media-apply-hope:";
 export const APPLY_HOPE_REQUEST_SIGNAL_NAME = "applyHopeRequest";
@@ -10,12 +15,17 @@ export const UPLOAD_PROCESSING_INPUT_ERROR_TYPE = "UploadProcessingInputError";
 export const UPLOAD_SOURCE_ERROR_TYPE = "UploadSourceError";
 export const UPLOAD_EXPIRED_ERROR_TYPE = "UploadExpiredError";
 export const HOPE_PROCESSING_ERROR_TYPE = "HopeProcessingError";
+export const UPLOAD_PUBLICATION_SELECTION_CONFLICT_ERROR_TYPE = "MediaUploadSelectionConflict";
 export const APPLY_HOPE_REPLY_ERROR_TYPES = [
   HOPE_PROCESSING_ERROR_TYPE,
   UPLOAD_EXPIRED_ERROR_TYPE,
   UPLOAD_PROCESSING_INPUT_ERROR_TYPE,
   UPLOAD_SOURCE_ERROR_TYPE,
   UPLOAD_VALIDATION_ERROR_TYPE,
+] as const;
+export const PUBLISH_UPLOAD_V2_REPLY_ERROR_TYPES = [
+  ...APPLY_HOPE_REPLY_ERROR_TYPES,
+  UPLOAD_PUBLICATION_SELECTION_CONFLICT_ERROR_TYPE,
 ] as const;
 export const UPLOAD_EXPIRATION_MS = 24 * 60 * 60 * 1000;
 export const HOPE_TASK_QUEUE = "media-hope";
@@ -47,6 +57,39 @@ export interface PublishUploadInput {
 export interface PublishUploadResult {
   id: string;
 }
+
+export interface PublishUploadV2Input {
+  id: string;
+  applyAiProhibitFilter?: boolean;
+}
+
+export interface NormalizedPublishUploadV2Input {
+  id: string;
+  applyAiProhibitFilter: boolean;
+}
+
+export interface PublishUploadV2WorkflowInput extends NormalizedPublishUploadV2Input {
+  hopeEnabled: boolean;
+}
+
+export type PublishUploadV2Result =
+  | { status: "completed"; id: string; url: string; mediaType: "image/webp" }
+  | { status: "processing"; id: string };
+
+export interface PublishUploadV2RequestSignal {
+  requestId: string;
+  replyWorkflowId: string;
+  applyAiProhibitFilter: boolean;
+}
+
+export interface PublishUploadV2RequestEnvelope {
+  requestId: string;
+  replyWorkflowId: string;
+}
+
+export type PublishUploadV2WorkflowReply =
+  | { requestId: string; result: PublishUploadV2Result }
+  | { requestId: string; error: PublishUploadV2WorkflowFailure };
 
 export interface PublishPreparedUploadInput extends ProcessUploadInput {
   hopeRequestId?: string;
@@ -102,6 +145,11 @@ export type ApplyHopeWorkflowReply =
 
 export interface ApplyHopeWorkflowFailure {
   type: typeof APPLY_HOPE_REPLY_ERROR_TYPES[number];
+  message: string;
+}
+
+export interface PublishUploadV2WorkflowFailure {
+  type: typeof PUBLISH_UPLOAD_V2_REPLY_ERROR_TYPES[number];
   message: string;
 }
 

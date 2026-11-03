@@ -10,6 +10,7 @@ import type {
   ProcessUploadInput,
   ProcessUploadResult,
   ApplyHopeInput,
+  PublishUploadV2Input,
 } from "../src/temporal/types";
 import { mediaService } from "../src/temporal/service";
 
@@ -133,6 +134,23 @@ export async function nexusPublishCallerWorkflow(endpoint: string, id: string) {
     return {
       result: await client.executeOperation("publishUpload", { id }, {
         scheduleToCloseTimeout: "3 seconds",
+      }),
+    };
+  } catch (error) {
+    return { error: errorMessage(error) };
+  }
+}
+
+export async function nexusPublishUploadV2CallerWorkflow(
+  endpoint: string,
+  input: PublishUploadV2Input,
+  scheduleToCloseTimeout = "25 hours",
+) {
+  const client = createNexusServiceClient({ service: mediaService, endpoint });
+  try {
+    return {
+      result: await client.executeOperation("publishUploadV2", input, {
+        scheduleToCloseTimeout,
       }),
     };
   } catch (error) {
