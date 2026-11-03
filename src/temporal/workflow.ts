@@ -657,12 +657,21 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
             const requestId = uuid4();
             hopeRequestIds.push(requestId);
             const hope = { algorithm: "glaze", iterations: 450, intensity: 0.3 } as const;
-            const preparation = runHopePreparation(validatedInput, requestId, hope, deadline);
+            const preparationOutcome = runHopePreparation(
+              validatedInput,
+              requestId,
+              hope,
+              deadline,
+            ).then(
+              () => ({ succeeded: true as const }),
+              (error: unknown) => ({ succeeded: false as const, error }),
+            );
             await sendPublishUploadV2Replies(validatedInput.id, requests, {
               result: { status: "processing", id: validatedInput.id },
             });
             try {
-              await preparation;
+              const outcome = await preparationOutcome;
+              if (!outcome.succeeded) throw outcome.error;
               selectedHopeRequestId = requestId;
               hopeFailed = false;
             } catch (error) {

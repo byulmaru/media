@@ -45,6 +45,7 @@ const PNG_1X1 = Buffer.from(
 const PUBLIC_BASE_URL = "https://media.byulma.run";
 const TASK_QUEUE = "media-nexus-tests";
 const WORKFLOW_TIMEOUT_MS = 10_000;
+const RELEASE_PUBLISH_REPLY_GATE_SIGNAL = "releasePublishUploadV2ReplyTestGate";
 
 function hopeActivityInput(options = {}) {
   const id = options.id ?? `u_${randomUUID()}`;
@@ -1764,6 +1765,7 @@ test("Nexus publishUploadV2 waits for public completion and shares an unfiltered
 test("Nexus publishUploadV2 returns processing for an immutable filtered selection", async () => {
   const workflowBundle = await bundleWorkflowCode({
     workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+    workflowInterceptorModules: [resolve("scripts/temporal-test-interceptors.ts")],
   });
   const executable = process.env.TEMPORAL_CLI_PATH
     ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
@@ -1784,6 +1786,7 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
   const failingSource = newUpload();
   let worker;
   let hopeWorker;
+  let failingUploadHandle;
 
   try {
     worker = await startWorker(
@@ -1964,7 +1967,29 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
       "conflicting false request did not reject",
     )).error, /MediaUploadSelectionConflict/);
     assert.equal(media.putCounts.get(failingPublicKey) ?? 0, 0);
+    failingUploadHandle = environment.client.workflow.getHandle(`media-upload:${failingSource.id}`);
     failureHopeGate.resolve();
+    const failureTaskOutcome = await waitFor(async () => {
+      const events = (await failingUploadHandle.fetchHistory()).events;
+      const failureIndex = events.findIndex((event) => event.activityTaskFailedEventAttributes);
+      if (failureIndex === -1) return false;
+      const taskStarted = events.slice(failureIndex + 1).find(
+        (event) => event.workflowTaskStartedEventAttributes,
+      );
+      if (!taskStarted) return false;
+      const taskStartIndex = events.indexOf(taskStarted);
+      return events.slice(taskStartIndex + 1).find((event) => {
+        const taskOutcome = event.workflowTaskCompletedEventAttributes ??
+          event.workflowTaskFailedEventAttributes;
+        return taskOutcome?.startedEventId != null && taskStarted.eventId != null &&
+          taskOutcome.startedEventId.toString() === taskStarted.eventId.toString();
+      }) ?? false;
+    }, "terminal Hope failure was not processed by a workflow task");
+    assert.ok(
+      failureTaskOutcome.workflowTaskCompletedEventAttributes,
+      "Hope failure should be handled while the processing reply signal is pending",
+    );
+    await failingUploadHandle.signal(RELEASE_PUBLISH_REPLY_GATE_SIGNAL);
     const failingUploadResult = await withTimeout(
       failingUploadCaller.result(),
       WORKFLOW_TIMEOUT_MS,
@@ -1972,10 +1997,20 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
     );
     assert.match(failingUploadResult.error, /injected terminal Hope failure/i);
     assert.equal(media.objects.has(failingPublicKey), false);
+    assert.equal(
+      (await failingUploadHandle.fetchHistory()).events.some(
+        (event) => event.workflowTaskFailedEventAttributes,
+      ),
+      false,
+      "filtered publication failure must not fail a workflow task",
+    );
     assert.deepEqual(workerFailures, []);
   } finally {
     hopeGate.resolve();
     failureHopeGate.resolve();
+    if (failingUploadHandle) {
+      await failingUploadHandle.signal(RELEASE_PUBLISH_REPLY_GATE_SIGNAL).catch(() => undefined);
+    }
     if (worker) await stopWorker(worker).catch(() => undefined);
     if (hopeWorker) await stopWorker(hopeWorker).catch(() => undefined);
     await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
