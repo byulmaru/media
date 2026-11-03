@@ -268,7 +268,7 @@ async function runHopePreparation(
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw uploadExpiredError();
   const cleanupGraceMs = 5 * 60 * 1000;
-  const startToCloseMs = Math.min(30 * 60 * 1000, remaining + cleanupGraceMs);
+  const startToCloseMs = Math.min(60 * 60 * 1000, remaining + cleanupGraceMs);
   const { prepareHopeUpload } = proxyActivities<HopeProcessingActivities>({
     taskQueue: HOPE_TASK_QUEUE,
     startToCloseTimeout: startToCloseMs,
