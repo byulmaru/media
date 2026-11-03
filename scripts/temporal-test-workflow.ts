@@ -14,7 +14,11 @@ import type {
 } from "../src/temporal/types";
 import { mediaService } from "../src/temporal/service";
 
-export { processUploadWorkflow, applyHopeWorkflow } from "../src/temporal/workflow";
+export {
+  processUploadWorkflow,
+  applyHopeWorkflow,
+  publishUploadV2Workflow,
+} from "../src/temporal/workflow";
 
 const finishSignal = defineSignal("finishNexusUploadTest");
 
