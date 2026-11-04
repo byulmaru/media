@@ -2280,7 +2280,7 @@ test("Nexus applyHope waits for queued processing and publishes its private vari
   }
 });
 
-test("Nexus applyHope retries transient worker failures, blocks stale publication, then clears to default", async () => {
+test("Nexus applyHope does not retry transient worker failures, blocks stale publication, then clears to default", async () => {
   const workflowBundle = await bundleWorkflowCode({
     workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
   });
@@ -2294,13 +2294,12 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
   const activityInputs = [];
   const endpointName = "media-hope-failure-test-" + randomUUID();
   const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
-  const terminalFailureStarted = deferred();
-  const terminalFailureGate = deferred();
+  const transientFailureStarted = deferred();
+  const transientFailureGate = deferred();
   const protectedWebp = await sharp({
     create: { width: 1, height: 1, channels: 3, background: { r: 240, g: 25, b: 135 } },
   }).webp({ quality: 50 }).toBuffer();
   let lastGoodKey;
-  let terminalFailureInput;
   let worker;
   let hopeWorker;
 
@@ -2319,6 +2318,9 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
       async (activityInput, cancellationSignal) => {
         activityInputs.push(activityInput);
         if (activityInput.hope.algorithm === "glaze") {
+          transientFailureStarted.resolve(activityInput);
+          await transientFailureGate.promise;
+          cancellationSignal.throwIfAborted();
           const glazeAttempts = activityInputs.filter((item) => item.hope.algorithm === "glaze").length;
           if (glazeAttempts === 1) {
             throw ApplicationFailure.create({
@@ -2326,28 +2328,18 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
               type: HOPE_PROCESSING_ERROR_TYPE,
             });
           }
-          lastGoodKey = hopePreparedUploadKey(testSourceKey(activityInput.id), activityInput.requestId);
-          await staging.putStream(
-            lastGoodKey,
-            Readable.from([protectedWebp]),
-            protectedWebp.byteLength,
-            {
-              onlyIf: new Headers({ "If-None-Match": "*" }),
-              httpMetadata: { contentType: "image/webp" },
-            },
-          );
-          return;
         }
 
-        terminalFailureInput = activityInput;
-        terminalFailureStarted.resolve(activityInput);
-        await terminalFailureGate.promise;
-        cancellationSignal.throwIfAborted();
-        throw ApplicationFailure.create({
-          message: "injected terminal Hope processing failure",
-          type: HOPE_PROCESSING_ERROR_TYPE,
-          nonRetryable: true,
-        });
+        lastGoodKey = hopePreparedUploadKey(testSourceKey(activityInput.id), activityInput.requestId);
+        await staging.putStream(
+          lastGoodKey,
+          Readable.from([protectedWebp]),
+          protectedWebp.byteLength,
+          {
+            onlyIf: new Headers({ "If-None-Match": "*" }),
+            httpMetadata: { contentType: "image/webp" },
+          },
+        );
       },
       workerFailures,
     );
@@ -2373,23 +2365,22 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
     const successfulHopeCaller = await startApplyHopeCaller(
       environment,
       endpointName,
-      { id: source.id, hope: { algorithm: "glaze", iterations: 29 } },
-      "hope-retry:" + randomUUID(),
+      { id: source.id, hope: { algorithm: "noise", iterations: 29 } },
+      "hope-success-before-failure:" + randomUUID(),
       "15 seconds",
     );
     assert.deepEqual(await withTimeout(
       successfulHopeCaller.result(),
       15_000,
-      "transient Hope activity failure did not retry",
+      "successful Hope update did not finish",
     ), {
-      result: { id: source.id, hope: { algorithm: "glaze", iterations: 29, intensity: 0.3 } },
+      result: { id: source.id, hope: { algorithm: "noise", iterations: 29, intensity: 0.3 } },
     });
-    assert.equal(activityInputs.length, 2);
-    assert.deepEqual(activityInputs[0], activityInputs[1]);
+    assert.equal(activityInputs.length, 1);
     assert.equal(activityInputs[0].maxEdge, 1024);
     assert.equal(activityInputs[0].id, source.id);
     assert.equal(Object.hasOwn(activityInputs[0], "sourceKey"), false);
-    assert.deepEqual(activityInputs[0].hope, { algorithm: "glaze", iterations: 29, intensity: 0.3 });
+    assert.deepEqual(activityInputs[0].hope, { algorithm: "noise", iterations: 29, intensity: 0.3 });
     assert(lastGoodKey);
     assert.equal(staging.objects.has(lastGoodKey), true);
     assert.deepEqual(Buffer.from(staging.objects.get(lastGoodKey).bytes), protectedWebp);
@@ -2398,8 +2389,8 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
     const failedHopeCaller = await startApplyHopeCaller(
       environment,
       endpointName,
-      { id: source.id, hope: { algorithm: "noise", iterations: 17 } },
-      "hope-terminal-failure:" + randomUUID(),
+      { id: source.id, hope: { algorithm: "glaze", iterations: 17 } },
+      "hope-transient-failure:" + randomUUID(),
       "10 seconds",
     );
     const failedHopeOutcomePromise = failedHopeCaller.result().then(
@@ -2407,9 +2398,9 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
       (error) => ({ error }),
     );
     await withTimeout(
-      terminalFailureStarted.promise,
+      transientFailureStarted.promise,
       WORKFLOW_TIMEOUT_MS,
-      "terminal Hope activity did not start",
+      "transient Hope activity did not start",
     );
 
     const pendingPublishCaller = await startPublishCaller(
@@ -2430,15 +2421,18 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
         (event) => event.workflowExecutionSignaledEventAttributes?.signalName === "publishUpload",
       );
     }, "publish signal was not recorded");
-    terminalFailureGate.resolve();
+    transientFailureGate.resolve();
 
     const failedHopeOutcome = await withTimeout(
       failedHopeOutcomePromise,
       WORKFLOW_TIMEOUT_MS,
-      "terminal Hope activity failure did not finish",
+      "transient Hope activity failure did not finish",
     );
     assert.match(failedHopeOutcome.value.error, /HopeProcessingError/);
-    const failedKey = hopePreparedUploadKey(source.sourceKey, terminalFailureInput.requestId);
+    assert.equal(activityInputs.length, 2);
+    assert.equal(activityInputs[1].id, source.id);
+    assert.deepEqual(activityInputs[1].hope, { algorithm: "glaze", iterations: 17, intensity: 0.3 });
+    const failedKey = hopePreparedUploadKey(source.sourceKey, activityInputs[1].requestId);
     assert.equal(staging.objects.has(failedKey), false);
     assert.equal(staging.objects.has(lastGoodKey), true);
     assert.equal(staging.objects.has(source.sourceKey), true);
@@ -2459,7 +2453,7 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
     assert.deepEqual(await withTimeout(clearCaller.result(), 5_000, "clear Hope update did not finish"), {
       result: { id: source.id, hope: null },
     });
-    assert.equal(activityInputs.length, 3);
+    assert.equal(activityInputs.length, 2);
     assert.equal(media.objects.has(publicKey), false);
 
     const finalPublishCaller = await startPublishCaller(
@@ -2502,7 +2496,7 @@ test("Nexus applyHope retries transient worker failures, blocks stale publicatio
       .includes("HopeProcessingError"), true);
     assert.deepEqual(workerFailures, []);
   } finally {
-    terminalFailureGate.resolve();
+    transientFailureGate.resolve();
     if (worker) await stopWorker(worker).catch(() => undefined);
     if (hopeWorker) await stopWorker(hopeWorker).catch(() => undefined);
     await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);

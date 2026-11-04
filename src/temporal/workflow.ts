@@ -276,6 +276,7 @@ async function runHopePreparation(
     heartbeatTimeout: Math.min(30_000, startToCloseMs),
     cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
     retry: {
+      maximumAttempts: 1,
       initialInterval: "1 second",
       maximumInterval: "30 seconds",
       nonRetryableErrorTypes: [
