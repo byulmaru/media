@@ -38,6 +38,11 @@ import {
   UPLOAD_VALIDATION_ERROR_TYPE,
 } from "./types";
 import {
+  createHopeObservability,
+  type HopeFailure,
+  type HopeObservability,
+} from "./hope-observability";
+import {
   parseHopeProcessingInput,
   parseProcessUploadInput,
   parsePublishPreparedUploadInput,
@@ -146,6 +151,22 @@ function hopeProcessingFailure(nonRetryable: boolean): ApplicationFailure {
   });
 }
 
+function hopeTelemetryFailure(error: unknown, aborted: boolean): HopeFailure {
+  if (aborted) return { type: "aborted", code: "activity_aborted" };
+  if (error instanceof ApplicationFailure) {
+    if (error.type === HOPE_PROCESSING_ERROR_TYPE) return { type: "processing", code: "hope_processing" };
+    if (error.type === UPLOAD_EXPIRED_ERROR_TYPE) return { type: "expired", code: "upload_expired" };
+    if (error.type === UPLOAD_SOURCE_ERROR_TYPE) return { type: "source", code: "upload_source" };
+    if (error.type === UPLOAD_VALIDATION_ERROR_TYPE || error.type === UPLOAD_PROCESSING_INPUT_ERROR_TYPE) {
+      return { type: "validation", code: "upload_validation" };
+    }
+  }
+  if (error instanceof HttpError && error.status >= 400 && error.status < 600) {
+    return { type: "validation", code: "upload_validation", status: error.status };
+  }
+  return { type: "unexpected", code: "activity_failed" };
+}
+
 function positiveIntegerHeader(response: HopeHttpResponse, name: string): number | undefined {
   const header = response.headers.get(name);
   if (header === null || !/^\d+$/.test(header)) return undefined;
@@ -218,170 +239,199 @@ export function createHopeProcessingActivities(
   staging: UploadStagingStorage,
   apiUrl: string,
   requestHopeResponse: HopeHttpRequest = requestHope,
+  observability: HopeObservability = createHopeObservability(false),
 ) {
   return {
     async prepareHopeUpload(rawInput: HopeProcessingInput): Promise<void> {
       const input = parseHopeProcessingInput(rawInput);
       if (!input) throw invalidProcessingInput();
-      const sourceKey = uploadSourceKey(input.id);
-
       const context = Context.current();
-      const heartbeatController = new AbortController();
-      const signal = AbortSignal.any([context.cancellationSignal, heartbeatController.signal]);
-      const timer = setInterval(() => {
-        try {
-          context.heartbeat();
-        } catch (error) {
-          heartbeatController.abort(error);
-        }
-      }, 4_000);
-
-      try {
-        const source = await staging.head(sourceKey);
-        const lastModified = source?.uploaded;
-        signal.throwIfAborted();
-        if (
-          !(lastModified instanceof Date) ||
-          !Number.isFinite(lastModified.getTime()) ||
-          lastModified.getTime() <= 0 ||
-          lastModified.getTime() > Date.now()
-        ) {
-          throw invalidUploadSource();
-        }
-        const deadline = lastModified.getTime() + UPLOAD_EXPIRATION_MS;
-        if (!Number.isFinite(deadline)) throw invalidUploadSource();
-        if (Date.now() >= deadline) throw uploadExpired();
-
-        const key = hopePreparedUploadKey(sourceKey, input.requestId);
-        const existing = await staging.head(key);
-        signal.throwIfAborted();
-        if (existing) {
-          if (isHopePreparedUpload(existing)) return;
-          throw hopeProcessingFailure(true);
-        }
-
-        let sourceBytes: ArrayBuffer;
-        try {
-          sourceBytes = await staging.get(sourceKey, DEFAULT_MAX_BYTES);
-        } catch (error) {
-          if (error instanceof RangeError) {
-            throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
+      const workflowExecution = context.info.workflowExecution;
+      return observability.runAttempt(input, {
+        workflowId: workflowExecution?.workflowId,
+        runId: workflowExecution?.runId,
+        activityId: context.info.activityId,
+        attempt: context.info.attempt,
+      }, async (telemetry) => {
+        const sourceKey = uploadSourceKey(input.id);
+        const heartbeatController = new AbortController();
+        const signal = AbortSignal.any([context.cancellationSignal, heartbeatController.signal]);
+        const timer = setInterval(() => {
+          try {
+            context.heartbeat();
+          } catch (error) {
+            heartbeatController.abort(error);
           }
-          throw error;
-        }
-        signal.throwIfAborted();
-        if (sourceBytes.byteLength > DEFAULT_MAX_BYTES) {
-          throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
-        }
+        }, 4_000);
 
-        const sourceInfo = validateImageUpload(
-          sourceBytes,
-          source?.httpMetadata?.contentType ?? "",
-          {
-            maxBytes: DEFAULT_MAX_BYTES,
-            maxDimension: DEFAULT_MAX_DIMENSION,
-          },
-        );
-        const sourceMetadata = await decodeImage(Buffer.from(sourceBytes), sourceInfo.format);
-        if (sourceMetadata.width !== sourceInfo.width || sourceMetadata.height !== sourceInfo.height) {
-          throw new HttpError(422, "invalid_image", "image processing failed");
-        }
-        signal.throwIfAborted();
-
-        const url = new URL("/protect", apiUrl);
-        url.search = new URLSearchParams({
-          algorithm: input.hope.algorithm,
-          iterations: String(input.hope.iterations),
-          intensity: String(input.hope.intensity),
-          max_edge: String(HOPE_MAX_EDGE),
-          quality: "80",
-        }).toString();
-
-        let response: HopeHttpResponse;
         try {
-          response = await requestHopeResponse(url, {
-            method: "POST",
-            headers: {
-              "content-type": "application/octet-stream",
-            },
-            body: Buffer.from(sourceBytes),
-            signal,
-          });
-        } catch (error) {
-          if (signal.aborted) signal.throwIfAborted();
-          throw hopeProcessingFailure(false);
-        }
-        signal.throwIfAborted();
-        if (response.status !== 200) {
-          await response.body?.cancel().catch(() => undefined);
+          const source = await staging.head(sourceKey);
+          const lastModified = source?.uploaded;
           signal.throwIfAborted();
-          const retryable = response.status === 408 || response.status === 429 ||
-            response.status === 503 || (response.status >= 500 && response.status <= 599);
-          throw hopeProcessingFailure(!retryable);
-        }
-        if (
-          response.headers.get("content-type")?.toLowerCase() !== "image/webp" ||
-          positiveIntegerHeader(response, "x-hope-model-calls") === undefined
-        ) {
-          await response.body?.cancel().catch(() => undefined);
-          throw hopeProcessingFailure(true);
-        }
-        const declaredWidth = positiveIntegerHeader(response, "x-hope-width");
-        const declaredHeight = positiveIntegerHeader(response, "x-hope-height");
-        if (declaredWidth === undefined || declaredHeight === undefined) {
-          await response.body?.cancel().catch(() => undefined);
-          throw hopeProcessingFailure(true);
-        }
+          if (
+            !(lastModified instanceof Date) ||
+            !Number.isFinite(lastModified.getTime()) ||
+            lastModified.getTime() <= 0 ||
+            lastModified.getTime() > Date.now()
+          ) {
+            throw invalidUploadSource();
+          }
+          const deadline = lastModified.getTime() + UPLOAD_EXPIRATION_MS;
+          if (!Number.isFinite(deadline)) throw invalidUploadSource();
+          if (Date.now() >= deadline) throw uploadExpired();
 
-        const output = await readHopeResponse(response, signal);
-        let outputInfo;
-        let outputMetadata: sharp.Metadata;
-        try {
-          outputInfo = validateImageUpload(
-            output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength) as ArrayBuffer,
-            "image/webp",
-            { maxBytes: maxHopeResponseBytes, maxDimension: HOPE_MAX_EDGE },
-          );
-          outputMetadata = await decodeImage(output, "webp");
-        } catch {
-          throw hopeProcessingFailure(true);
-        }
-        if (
-          outputMetadata.width !== outputInfo.width ||
-          outputMetadata.height !== outputInfo.height ||
-          outputInfo.width !== declaredWidth ||
-          outputInfo.height !== declaredHeight
-        ) {
-          throw hopeProcessingFailure(true);
-        }
-        signal.throwIfAborted();
-        if (Date.now() >= deadline) throw uploadExpired();
-
-        const outputStream = Readable.from([output]);
-        try {
-          const stored = await staging.putStream(
-            key,
-            outputStream,
-            output.byteLength,
-            {
-              onlyIf: new Headers({ "If-None-Match": "*" }),
-              httpMetadata: { contentType: "image/webp" },
-            },
-          );
+          const key = hopePreparedUploadKey(sourceKey, input.requestId);
+          const existing = await staging.head(key);
           signal.throwIfAborted();
-          if (!stored && !isHopePreparedUpload(await staging.head(key))) {
+          if (existing) {
+            if (isHopePreparedUpload(existing)) return;
             throw hopeProcessingFailure(true);
           }
+
+          let sourceBytes: ArrayBuffer;
+          try {
+            sourceBytes = await staging.get(sourceKey, DEFAULT_MAX_BYTES);
+          } catch (error) {
+            if (error instanceof RangeError) {
+              throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
+            }
+            throw error;
+          }
           signal.throwIfAborted();
+          if (sourceBytes.byteLength > DEFAULT_MAX_BYTES) {
+            throw new HttpError(413, "size_limit_exceeded", "image exceeds maxBytes");
+          }
+
+          const sourceInfo = validateImageUpload(
+            sourceBytes,
+            source?.httpMetadata?.contentType ?? "",
+            {
+              maxBytes: DEFAULT_MAX_BYTES,
+              maxDimension: DEFAULT_MAX_DIMENSION,
+            },
+          );
+          const sourceMetadata = await decodeImage(Buffer.from(sourceBytes), sourceInfo.format);
+          if (sourceMetadata.width !== sourceInfo.width || sourceMetadata.height !== sourceInfo.height) {
+            throw new HttpError(422, "invalid_image", "image processing failed");
+          }
+          telemetry.setImageMetadata(sourceBytes.byteLength, sourceInfo.width, sourceInfo.height);
+          signal.throwIfAborted();
+
+          const url = new URL("/protect", apiUrl);
+          url.search = new URLSearchParams({
+            algorithm: input.hope.algorithm,
+            iterations: String(input.hope.iterations),
+            intensity: String(input.hope.intensity),
+            max_edge: String(HOPE_MAX_EDGE),
+            quality: "80",
+          }).toString();
+
+          const progressPoller = telemetry.startProgressPolling(apiUrl, input.requestId, input.hope.iterations);
+          let output: Buffer;
+          try {
+            let response: HopeHttpResponse;
+            try {
+              response = await requestHopeResponse(url, {
+                method: "POST",
+                headers: {
+                  "content-type": "application/octet-stream",
+                  "X-Hope-Request-Id": input.requestId,
+                },
+                body: Buffer.from(sourceBytes),
+                signal,
+              });
+            } catch (error) {
+              if (signal.aborted) signal.throwIfAborted();
+              throw hopeProcessingFailure(false);
+            }
+            signal.throwIfAborted();
+            if (response.status !== 200) {
+              await response.body?.cancel().catch(() => undefined);
+              signal.throwIfAborted();
+              telemetry.recordFailure({
+                type: "processing",
+                code: "hope_processing",
+                ...(response.status >= 400 && response.status <= 599 ? { status: response.status } : {}),
+              });
+              const retryable = response.status === 408 || response.status === 429 ||
+                response.status === 503 || (response.status >= 500 && response.status <= 599);
+              throw hopeProcessingFailure(!retryable);
+            }
+            if (
+              response.headers.get("content-type")?.toLowerCase() !== "image/webp" ||
+              positiveIntegerHeader(response, "x-hope-model-calls") === undefined
+            ) {
+              await response.body?.cancel().catch(() => undefined);
+              throw hopeProcessingFailure(true);
+            }
+            const declaredWidth = positiveIntegerHeader(response, "x-hope-width");
+            const declaredHeight = positiveIntegerHeader(response, "x-hope-height");
+            if (declaredWidth === undefined || declaredHeight === undefined) {
+              await response.body?.cancel().catch(() => undefined);
+              throw hopeProcessingFailure(true);
+            }
+
+            output = await readHopeResponse(response, signal);
+            let outputInfo;
+            let outputMetadata: sharp.Metadata;
+            try {
+              outputInfo = validateImageUpload(
+                output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength) as ArrayBuffer,
+                "image/webp",
+                { maxBytes: maxHopeResponseBytes, maxDimension: HOPE_MAX_EDGE },
+              );
+              outputMetadata = await decodeImage(output, "webp");
+            } catch {
+              throw hopeProcessingFailure(true);
+            }
+            if (
+              outputMetadata.width !== outputInfo.width ||
+              outputMetadata.height !== outputInfo.height ||
+              outputInfo.width !== declaredWidth ||
+              outputInfo.height !== declaredHeight
+            ) {
+              throw hopeProcessingFailure(true);
+            }
+            signal.throwIfAborted();
+            if (Date.now() >= deadline) throw uploadExpired();
+          } catch (error) {
+            await progressPoller?.fail();
+            throw error;
+          } finally {
+            await progressPoller?.stop();
+          }
+
+          const outputStream = Readable.from([output]);
+          try {
+            const stored = await staging.putStream(
+              key,
+              outputStream,
+              output.byteLength,
+              {
+                onlyIf: new Headers({ "If-None-Match": "*" }),
+                httpMetadata: { contentType: "image/webp" },
+              },
+            );
+            signal.throwIfAborted();
+            if (!stored && !isHopePreparedUpload(await staging.head(key))) {
+              throw hopeProcessingFailure(true);
+            }
+            signal.throwIfAborted();
+          } finally {
+            outputStream.destroy();
+          }
+        } catch (error) {
+          if (signal.aborted) {
+            telemetry.recordFailure(hopeTelemetryFailure(error, true));
+            signal.throwIfAborted();
+          }
+          const normalized = asNonRetryableValidationFailure(error) ?? error;
+          telemetry.recordFailure(hopeTelemetryFailure(error, false));
+          throw normalized;
         } finally {
-          outputStream.destroy();
+          clearInterval(timer);
         }
-      } catch (error) {
-        if (signal.aborted) signal.throwIfAborted();
-        throw asNonRetryableValidationFailure(error) ?? error;
-      } finally {
-        clearInterval(timer);
-      }
+      });
     },
   };
 }

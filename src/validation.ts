@@ -101,6 +101,9 @@ export const temporalUploadConfigSchema = z.object({
   R2_STAGING_BUCKET_NAME: nonWhitespaceNodeValueSchema,
   HOPE_API_URL: hopeApiUrlSchema.optional(),
   HOPE_CONCURRENCY: hopeConcurrencySchema,
+  SENTRY_DSN: z.string().optional(),
+  SENTRY_ENVIRONMENT: z.string().optional(),
+  SENTRY_RELEASE: z.string().optional(),
 })
   .refine((config) => config.R2_BUCKET_NAME !== config.R2_STAGING_BUCKET_NAME);
 

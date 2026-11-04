@@ -6,6 +6,7 @@ import { createR2S3MediaStorage } from "../storage/r2-s3";
 import { createR2S3StagingStorage } from "../storage/staging";
 import { temporalUploadConfigSchema } from "../validation";
 import { createHopeProcessingActivities, createUploadProcessingActivities } from "./activities";
+import { initializeHopeObservability } from "./hope-observability";
 import { createMediaServiceHandler } from "./nexus";
 import { HOPE_TASK_QUEUE } from "./types";
 
@@ -72,6 +73,7 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
     secretAccessKey: config.AWS_SECRET_ACCESS_KEY,
   });
   const connection = await NativeConnection.connect({ address: config.TEMPORAL_ADDRESS });
+  const observability = initializeHopeObservability(config);
   await runWorkerGroup(async (workers) => {
     workers.push(await Worker.create({
       connection,
@@ -92,13 +94,21 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
         activities: createHopeProcessingActivities(
           staging,
           config.HOPE_API_URL,
+          undefined,
+          observability,
         ),
         maxConcurrentActivityTaskExecutions: config.HOPE_CONCURRENCY,
         maxHeartbeatThrottleInterval: "5 seconds",
         defaultHeartbeatThrottleInterval: "5 seconds",
       }));
     }
-  }, () => connection.close());
+  }, async () => {
+    try {
+      await connection.close();
+    } finally {
+      await observability.close();
+    }
+  });
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
