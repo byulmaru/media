@@ -95,6 +95,10 @@ Media가 정의한 Activity 계약은 `prepareHopeUpload(input): Promise<void>`�
 
 `hope.apiUrl`을 설정하면 Media Worker가 같은 Temporal namespace의 고정 `media-hope` task queue에서 공유 durable backlog를 처리합니다. `hope.concurrency`는 각 Media Worker의 Hope Activity 실행 상한이며, Worker replica가 여러 개면 처리 용량은 replica별 상한의 합입니다. Task dispatch 순서는 대략적인 큐 순서이고 완료 순서나 요청의 엄격한 순서는 보장하지 않습니다. Hope API는 현재 한 번에 하나의 요청만 처리하고 초과 요청에 `503`을 반환하므로 기본값은 `1`입니다. API 용량을 맞춘 경우에만 값을 높입니다. URL이 없으면 HTTP poller를 만들지 않습니다. 기본값 `hope.enabled: true`는 Media Nexus의 Hope operation gate만 제어하며 HTTP poller 설정과 독립적입니다. `hope.apiUrl`은 Mac의 private Tailscale Serve HTTPS origin이어야 합니다. API는 loopback에서만 수신하고 Media는 별도 호출 토큰이나 인증 헤더 없이 요청합니다. TLS 인증서 검증을 유지합니다. Kubernetes CoreDNS는 Tailscale MagicDNS를 전달하지 않으므로, Serve FQDN이 Pod에서 해석되지 않을 때만 `worker.hostAliases`에 Serve FQDN과 검증된 Mac Tailscale IPv4 주소를 매핑합니다. 필요한 `tag:aws-router` TCP 443 grant는 VPC 출구 라우터의 공유 신원에 적용되며 개별 Media Pod 신원에는 적용되지 않습니다. Chart는 기본 URL이 비어 있고 `hostAliases`도 비어 있으므로 운영자가 endpoint와 필요 시 host mapping을 설정합니다. Funnel과 TLS 검증 비활성화는 지원하지 않습니다. Activity는 5초 이내 간격으로 heartbeat하고 30초 heartbeat timeout을 사용합니다. 취소 시 HTTP 요청을 abort하고 진행 중인 R2 쓰기가 끝난 뒤 Workflow cleanup이 이어집니다. 원본 업로드 제한은 최대 16 MiB, 긴 변 8192px, 총 16 MiPixels이며, 보호 결과는 최대 16 MiB와 1024px edge로 제한합니다. Staging 객체는 게시 또는 cleanup으로 정리하고 48시간 lifecycle 규칙이 남은 객체를 정리하는 backstop입니다.
 
+Helm의 `sentry.dsn`에는 Media 프로젝트의 공개 Sentry DSN을 설정할 수 있습니다. 설정하면 Media Worker만 `@sentry/node`를 초기화하고 각 `prepareHopeUpload` Activity attempt에 trace를 만듭니다. DSN이 비어 있으면 trace와 진행률 polling을 모두 건너뜁니다. `SENTRY_AUTH_TOKEN`은 런타임에 사용하지 않습니다. `/protect` 요청과 같은 `X-Hope-Request-Id`로 `/progress`를 5초 간격으로 조회하며, GET은 2초 timeout과 16 KiB 응답 상한을 적용합니다. 불일치·잘못된 schema·후퇴한 누적값은 폐기하고, `null` 또는 조회 오류에서는 마지막 유효 snapshot과 관측 시각을 보존합니다. 관측 시각과 age는 Media가 같은 snapshot을 마지막으로 읽은 시간 기준이며 native callback 시각을 추정하지 않습니다. 실패나 취소 뒤에는 Activity 취소 signal과 분리된 마지막 조회를 한 번 시도합니다. Sentry에는 요청한 algorithm/iteration 설정, image byte 수와 크기, Temporal correlation ID, 마지막 유효 진행률과 경과 시간을 보냅니다. 이미지 bytes, URL/storage key, HTTP header/body와 서버의 임의 문자열은 보내지 않습니다.
+
+Native 진행률에서 `tileCurrent`는 바깥 tile 번호이며 각 tile 안에서 `iterationCurrent`가 다시 시작합니다. 누적값은 `(tileCurrent - 1) * iterationTotal + iterationCurrent`이고, 총 작업량은 `tileTotal * iterationTotal`입니다. 따라서 이 값은 이미지 전체를 동기화한 iteration 수가 아니라 tile-iteration 수입니다. Native callback은 5회 iteration마다 진행률을 내보내므로 마지막 관측값은 실제 진행보다 최대 4회 iteration과 polling 지연만큼 뒤처질 수 있습니다. Native `elapsedMs`는 image decode와 model mutex 대기 뒤부터 측정하며, Media의 Activity elapsed 시간은 별도로 기록합니다.
+
 브라우저 crop/rotate 편집과 Hope 사용 여부에 관계없이 적용할 일반 최종 출력 크기 상한은 [PROD-1192](https://linear.app/byulmaru/issue/PROD-1192/원본-기반-이미지-편집과-hope-처리-제한을-구현한다)의 후속 작업입니다.
 
 ## Infrastructure
@@ -188,6 +192,7 @@ Media Worker는 별도 Deployment에서 `node dist/worker.js`로 실행되며 AP
 - Hope feature gate: `HOPE_ENABLED` (Helm의 `hope.enabled` chart 기본값은 `true`; application에서 변수가 unset이면 기본값은 `false`)
 - Optional Hope HTTP poller: `HOPE_API_URL` (unset disables it)
 - Optional Hope Activity concurrency: `HOPE_CONCURRENCY` (unset defaults to `1`; raise it only to match Hope API capacity)
+- Optional worker Sentry telemetry: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE` (Helm sets environment to `production` and release from `.Values.version`)
 - Bucket 설정: `PUBLIC_BASE_URL`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_STAGING_BUCKET_NAME`
 - R2 credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
 

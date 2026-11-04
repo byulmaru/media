@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Readable } from "node:stream";
@@ -21,17 +22,21 @@ import { ApplicationFailure, CancelledFailure, Context, heartbeat } from "@tempo
 import { defaultPayloadConverter } from "@temporalio/client";
 import { MockActivityEnvironment, TestWorkflowEnvironment } from "@temporalio/testing";
 import { bundleWorkflowCode, NativeConnection, Worker } from "@temporalio/worker";
+import * as Sentry from "@sentry/node";
 import {
   createUploadProcessingActivities,
   createHopeProcessingActivities,
+  createHopeObservability,
   createMediaServiceHandler,
   DEFAULT_MAX_BYTES,
   HOPE_PROCESSING_ERROR_TYPE,
   HOPE_TASK_QUEUE,
+  initializeHopeObservability,
   hopePreparedUploadKey,
   JPEG_ORIENTED_2X1,
   mediaServiceHandler,
   PNG_RGBA_2X1,
+  parseHopeProgress,
   R2S3MediaStorage,
   R2S3StagingStorage,
   runWorkerGroup,
@@ -2913,6 +2918,7 @@ test("Media Hope Activity validates and stores the returned WebP idempotently", 
   assert.equal(requests[0].options.method, "POST");
   assert.equal(Object.hasOwn(requests[0].options.headers, "authorization"), false);
   assert.equal(requests[0].options.headers["content-type"], "application/octet-stream");
+  assert.equal(requests[0].options.headers["X-Hope-Request-Id"], input.requestId);
   assert.equal(requests[0].options.body.byteLength, PNG_RGBA_2X1.byteLength);
   assert.deepEqual(stored.httpMetadata, { contentType: "image/webp" });
   assert.deepEqual(stored.bytes, protectedBytes);
@@ -3122,4 +3128,374 @@ test("Media Hope Activity aborts HTTP on cancellation and waits for a pending R2
   await assert.rejects(writeTask, (error) => error instanceof CancelledFailure);
   assert.equal(writeTaskSettled, true);
   assert.equal(writeStaging.objects.has(writeKey), true);
+});
+
+function nativeHopeProgress(requestId, options = {}) {
+  const tileCurrent = options.tileCurrent ?? 1;
+  const tileTotal = options.tileTotal ?? 2;
+  const iterationCurrent = options.iterationCurrent ?? 1;
+  const iterationTotal = options.iterationTotal ?? 300;
+  return {
+    progress: {
+      requestId: options.requestId ?? requestId,
+      stage: options.stage ?? "processing",
+      tileCurrent,
+      tileTotal,
+      iterationCurrent,
+      iterationTotal,
+      completedIterations: options.completedIterations ?? (tileCurrent - 1) * iterationTotal + iterationCurrent,
+      totalIterations: options.totalIterations ?? tileTotal * iterationTotal,
+      elapsedMs: options.elapsedMs ?? 1,
+      estimatedRemainingMs: options.estimatedRemainingMs === undefined ? 1 : options.estimatedRemainingMs,
+      privateDiagnostic: "HOPE_PROGRESS_BODY_SENTINEL",
+    },
+    privatePayload: "HOPE_PROGRESS_PAYLOAD_SENTINEL",
+  };
+}
+
+function hopeProgressResponse(payload) {
+  return { status: 200, body: Buffer.from(JSON.stringify(payload)) };
+}
+
+function serializeSentryPayloads(envelopes) {
+  return envelopes.flatMap((envelope) => envelope[1]).map(([, payload]) => {
+    if (typeof payload === "string") return payload;
+    if (payload instanceof Uint8Array) return Buffer.from(payload).toString("utf8");
+    return JSON.stringify(payload);
+  }).join("\n");
+}
+
+function sentryProgressSpans(envelopes) {
+  return envelopes.flatMap((envelope) => envelope[1]).flatMap(([, payload]) => {
+    let parsed = payload;
+    if (typeof parsed === "string") {
+      try { parsed = JSON.parse(parsed); } catch { return []; }
+    } else if (parsed instanceof Uint8Array) {
+      try { parsed = JSON.parse(Buffer.from(parsed).toString("utf8")); } catch { return []; }
+    }
+    return Array.isArray(parsed?.items)
+      ? parsed.items.filter((item) => item.name === "hope.progress")
+      : [];
+  });
+}
+
+function spanAttributes(span) {
+  return Object.fromEntries(Object.entries(span.attributes ?? {}).map(([key, value]) => [key, value.value]));
+}
+
+test("Hope progress parsing follows native tile iteration counts and rejects unsafe snapshots", () => {
+  const requestId = randomUUID();
+  const tileReset = parseHopeProgress(nativeHopeProgress(requestId, {
+    tileCurrent: 2,
+    iterationCurrent: 1,
+    stage: "processing",
+    elapsedMs: 42_000,
+    estimatedRemainingMs: null,
+  }), requestId, 300);
+  assert.deepEqual(tileReset, {
+    kind: "valid",
+    progress: {
+      stage: "processing",
+      tileCurrent: 2,
+      tileTotal: 2,
+      iterationCurrent: 1,
+      iterationTotal: 300,
+      completedIterations: 301,
+      totalIterations: 600,
+      elapsedMs: 42_000,
+      estimatedRemainingMs: null,
+    },
+  });
+  const encoding = parseHopeProgress(nativeHopeProgress(requestId, {
+    tileCurrent: 2,
+    iterationCurrent: 300,
+    stage: "encoding",
+    elapsedMs: 43_000,
+  }), requestId, 300);
+  assert.equal(encoding.kind, "valid");
+
+  const valid = nativeHopeProgress(requestId, { iterationCurrent: 20, elapsedMs: 20 });
+  assert.equal(parseHopeProgress(nativeHopeProgress(requestId, { requestId: "another-request" }), requestId, 300).code, "request_mismatch");
+  assert.equal(parseHopeProgress(nativeHopeProgress(requestId, { iterationCurrent: 2 ** 53 }), requestId, 300).code, "invalid_counters");
+  assert.equal(parseHopeProgress({ progress: { ...valid.progress, completedIterations: 21 } }, requestId, 300).code, "invalid_counters");
+});
+
+test("Hope observability keeps no-DSN work uninstrumented and invokes it once", async () => {
+  const observability = initializeHopeObservability({});
+  const input = hopeActivityInput({ hope: { algorithm: "nightshade", iterations: 300, intensity: 0.3 } });
+  const result = { prepared: true };
+  let operationCalls = 0;
+
+  assert.strictEqual(await observability.runAttempt(input, {}, async (telemetry) => {
+    operationCalls += 1;
+    assert.equal(telemetry.startProgressPolling("https://hope.example", input.requestId, 300), undefined);
+    return result;
+  }), result);
+  assert.equal(operationCalls, 1);
+
+  const businessError = new Error("original business error");
+  await assert.rejects(observability.runAttempt(input, {}, async () => {
+    operationCalls += 1;
+    throw businessError;
+  }), (error) => error === businessError);
+  assert.equal(operationCalls, 2);
+  await observability.close();
+});
+
+test("Hope observability records bounded snapshots and preserves the Activity outcome", async () => {
+  const envelopes = [];
+  Sentry.init({
+    dsn: "https://HOPE_TEST_PUBLIC_DSN_SENTINEL@o0.ingest.sentry.io/12345",
+    defaultIntegrations: false,
+    enableOpenTelemetrySetup: false,
+    tracesSampleRate: 1,
+    traceLifecycle: "stream",
+    transport: () => ({
+      async send(envelope) {
+        envelopes.push(envelope);
+        return { statusCode: 200 };
+      },
+      async flush() { return true; },
+    }),
+  });
+
+  const input = hopeActivityInput({
+    id: "u_PRIVATE_UPLOAD_KEY_SENTINEL",
+    hope: { algorithm: "nightshade", iterations: 300, intensity: 0.3 },
+  });
+  const originalError = new Error("HOPE_ORIGINAL_ERROR_SENTINEL");
+  let operationCalls = 0;
+  let requestCount = 0;
+  let resolveFirstResponse;
+  const firstRequestStarted = deferred();
+  const firstResponse = new Promise((resolve) => { resolveFirstResponse = resolve; });
+  const requests = [];
+  const progressRequest = async (url, requestId, signal) => {
+    requestCount += 1;
+    requests.push({ url, requestId, signal });
+    if (requestCount === 1) {
+      firstRequestStarted.resolve();
+      return firstResponse;
+    }
+    if (requestCount === 2) return hopeProgressResponse(nativeHopeProgress(requestId, { iterationCurrent: 100, elapsedMs: 100 }));
+    if (requestCount === 3) return hopeProgressResponse(nativeHopeProgress(requestId, { iterationCurrent: 100, elapsedMs: 100 }));
+    if (requestCount === 4) return hopeProgressResponse(nativeHopeProgress(requestId, { iterationCurrent: 101, elapsedMs: 101 }));
+    if (requestCount === 5) return hopeProgressResponse(nativeHopeProgress(requestId, { iterationCurrent: 102, elapsedMs: 102 }));
+    if (requestCount === 6) return hopeProgressResponse(nativeHopeProgress(requestId, { requestId: "mismatched-request" }));
+    if (requestCount === 7) return hopeProgressResponse(nativeHopeProgress(requestId, { iterationCurrent: 101, elapsedMs: 101 }));
+    if (requestCount === 8) return hopeProgressResponse(nativeHopeProgress(requestId, {
+      tileTotal: 3,
+      tileCurrent: 1,
+      iterationCurrent: 102,
+      elapsedMs: 103,
+    }));
+    throw new Error("HOPE_PROGRESS_TRANSPORT_ERROR_SENTINEL");
+  };
+
+  const priorPerformanceNow = Object.getOwnPropertyDescriptor(performance, "now");
+  let fakeNow = 1_000;
+  Object.defineProperty(performance, "now", { configurable: true, value: () => fakeNow });
+  const nativeSetInterval = globalThis.setInterval;
+  const nativeClearInterval = globalThis.clearInterval;
+  let manualInterval;
+  globalThis.setInterval = (callback, intervalMs) => {
+    manualInterval = { callback, intervalMs, cleared: false };
+    return manualInterval;
+  };
+  globalThis.clearInterval = (handle) => { handle.cleared = true; };
+
+  const traceCallbackPromises = [];
+  const startNewTraceThenThrow = (callback) => {
+    traceCallbackPromises.push(Promise.resolve(callback()));
+    throw new Error("HOPE_TRACE_DISPATCH_ERROR_SENTINEL");
+  };
+  const observability = createHopeObservability(true, progressRequest, startNewTraceThenThrow);
+
+  try {
+    const operation = observability.runAttempt(input, {
+      workflowId: "workflow-hope-test",
+      runId: "run-hope-test",
+      activityId: "activity-hope-test",
+      attempt: 1,
+    }, async (telemetry) => {
+      operationCalls += 1;
+      telemetry.setImageMetadata(8, 2, 1);
+      const poller = telemetry.startProgressPolling(
+        "https://HOPE-API-URL-SENTINEL.invalid/api?token=HOPE_URL_TOKEN_SENTINEL",
+        input.requestId,
+        input.hope.iterations,
+      );
+      assert(poller);
+      assert.equal(manualInterval.intervalMs, 5_000);
+
+      manualInterval.callback();
+      await firstRequestStarted.promise;
+      manualInterval.callback();
+      await delay(0);
+      assert.equal(requestCount, 1, "poller must not overlap requests");
+
+      resolveFirstResponse(hopeProgressResponse(nativeHopeProgress(input.requestId, {
+        iterationCurrent: 100,
+        elapsedMs: 100,
+      })));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      for (const [expectedRequestCount, now] of [
+        [2, 20_000],
+        [3, 30_999],
+        [4, 31_000],
+        [5, 31_001],
+        [6, 31_002],
+        [7, 31_003],
+        [8, 31_004],
+      ]) {
+        fakeNow = now;
+        manualInterval.callback();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(requestCount, expectedRequestCount);
+      }
+
+      telemetry.recordFailure({ type: "processing", code: "hope_processing", status: 503 });
+      await poller.fail();
+      assert.equal(requestCount, 9, "failure performs one independent final GET");
+      assert.equal(manualInterval.cleared, true, "failure stops the interval");
+      assert.equal(requests.every((request) => request.url.pathname === "/progress"), true);
+      assert.equal(requests.every((request) => request.url.search === ""), true);
+      assert.equal(requests.every((request) => request.requestId === input.requestId), true);
+      assert.equal(requests[8].signal.aborted, false, "final GET uses its own cancellation signal");
+      throw originalError;
+    });
+
+    await assert.rejects(operation, (error) => error === originalError);
+    await Promise.all(traceCallbackPromises);
+    assert.equal(operationCalls, 1, "a tracing wrapper failure must not rerun business work");
+
+    const duplicateInput = hopeActivityInput({ hope: { algorithm: "nightshade", iterations: 300, intensity: 0.3 } });
+    const duplicateSnapshot = nativeHopeProgress(duplicateInput.requestId, { iterationCurrent: 7, elapsedMs: 7 });
+    const duplicateObservability = createHopeObservability(true, async () => hopeProgressResponse(duplicateSnapshot));
+    const duplicateResult = { unchanged: true };
+    let duplicateCalls = 0;
+    assert.strictEqual(await duplicateObservability.runAttempt(duplicateInput, {}, async (telemetry) => {
+      duplicateCalls += 1;
+      const poller = telemetry.startProgressPolling("https://hope.example", duplicateInput.requestId, 300);
+      assert(poller);
+      manualInterval.callback();
+      await new Promise((resolve) => setImmediate(resolve));
+      manualInterval.callback();
+      await new Promise((resolve) => setImmediate(resolve));
+      await poller.stop();
+      return duplicateResult;
+    }), duplicateResult);
+    assert.equal(duplicateCalls, 1);
+
+    const tileInput = hopeActivityInput({ hope: { algorithm: "nightshade", iterations: 300, intensity: 0.3 } });
+    const tileSnapshots = [
+      nativeHopeProgress(tileInput.requestId, { tileCurrent: 1, iterationCurrent: 300, elapsedMs: 300 }),
+      nativeHopeProgress(tileInput.requestId, {
+        tileCurrent: 2,
+        iterationCurrent: 1,
+      stage: "processing",
+        elapsedMs: 301,
+        estimatedRemainingMs: null,
+      }),
+    ];
+    let tileRequestCount = 0;
+    const tileObservability = createHopeObservability(true, async () => {
+      const payload = tileSnapshots[tileRequestCount++];
+      assert(payload);
+      return hopeProgressResponse(payload);
+    });
+    const tileResult = { completed: true };
+    let tileOperationCalls = 0;
+    assert.strictEqual(await tileObservability.runAttempt(tileInput, {}, async (telemetry) => {
+      tileOperationCalls += 1;
+      const poller = telemetry.startProgressPolling("https://hope.example", tileInput.requestId, 300);
+      assert(poller);
+      manualInterval.callback();
+      await new Promise((resolve) => setImmediate(resolve));
+      manualInterval.callback();
+      await new Promise((resolve) => setImmediate(resolve));
+      await poller.stop();
+      return tileResult;
+    }), tileResult);
+    assert.equal(tileRequestCount, 2);
+    assert.equal(tileOperationCalls, 1);
+
+    const abortInput = hopeActivityInput({ hope: { algorithm: "nightshade", iterations: 300, intensity: 0.3 } });
+    const abortStarted = deferred();
+    let abortRequestCount = 0;
+    let requestAborted = false;
+    const abortObservability = createHopeObservability(true, async (_url, _requestId, signal) => {
+      abortRequestCount += 1;
+      return new Promise((_, reject) => {
+        signal.addEventListener("abort", () => {
+          requestAborted = true;
+          reject(new Error("HOPE_ABORTED_PROGRESS_REQUEST_SENTINEL"));
+        }, { once: true });
+        abortStarted.resolve();
+      });
+    });
+    const abortResult = { stopped: true };
+    assert.strictEqual(await abortObservability.runAttempt(abortInput, {}, async (telemetry) => {
+      const poller = telemetry.startProgressPolling("https://hope.example", abortInput.requestId, 300);
+      assert(poller);
+      manualInterval.callback();
+      await abortStarted.promise;
+      await poller.stop();
+      assert.equal(manualInterval.cleared, true);
+      return abortResult;
+    }), abortResult);
+    assert.equal(abortRequestCount, 1, "stop cancels the in-flight request without an extra GET");
+    assert.equal(requestAborted, true);
+  } finally {
+    globalThis.setInterval = nativeSetInterval;
+    globalThis.clearInterval = nativeClearInterval;
+    if (priorPerformanceNow) Object.defineProperty(performance, "now", priorPerformanceNow);
+    else delete performance.now;
+    await observability.close();
+  }
+
+  const payloadText = serializeSentryPayloads(envelopes);
+  const progressSpans = sentryProgressSpans(envelopes);
+  assert(payloadText.includes("hope.progress.checkpoint"));
+  assert.equal(progressSpans.length, 9,
+    "expected first, one 30-second changed, failure-terminal, duplicate-first/terminal, tile-first/boundary/terminal, and aborted terminal checkpoints");
+  assert(payloadText.includes("hope.progress.completed_iterations"));
+  assert(payloadText.includes("hope.progress.tile_current"));
+  const failedTerminal = progressSpans.map((span) => ({ span, attributes: spanAttributes(span) })).find(({ attributes }) =>
+    attributes["hope.progress.checkpoint"] === "terminal" && attributes["hope.failure.code"] === "hope_processing");
+  assert(failedTerminal);
+  assert.equal(failedTerminal.attributes["hope.progress.completed_iterations"], 102);
+  assert.equal(failedTerminal.attributes["hope.progress.total_iterations"], 600,
+    "a correlated request must retain its initial native tile total");
+  assert.equal(failedTerminal.attributes["hope.progress.tile_current"], 1);
+  assert.equal(failedTerminal.attributes["hope.progress.error_code"], "request_failed");
+  const duplicateTerminal = progressSpans.map((span) => ({ span, attributes: spanAttributes(span) })).find(({ attributes }) =>
+    attributes["hope.progress.checkpoint"] === "terminal" && attributes["hope.progress.completed_iterations"] === 7);
+  assert(duplicateTerminal);
+  assert.equal(duplicateTerminal.attributes["hope.progress.error"], false, "an identical valid poll is not an error");
+  const tileBoundary = progressSpans.map(spanAttributes).find((attributes) => attributes["hope.progress.checkpoint"] === "tile_boundary");
+  assert(tileBoundary);
+  assert.equal(tileBoundary["hope.progress.completed_iterations"], 301);
+  assert.equal(tileBoundary["hope.progress.iteration_current"], 1);
+  assert.equal(tileBoundary["hope.progress.total_iterations"], 600);
+  assert(payloadText.includes('"hope.progress.error_code":"request_failed"'));
+  assert(payloadText.includes("hope.failure.code"));
+  assert(payloadText.includes("hope_processing"));
+  assert(payloadText.includes("workflow-hope-test"));
+  assert(payloadText.includes("Hope processing failed"));
+  for (const privateValue of [
+    "HOPE_ORIGINAL_ERROR_SENTINEL",
+    "HOPE_TRACE_DISPATCH_ERROR_SENTINEL",
+    "HOPE_PROGRESS_TRANSPORT_ERROR_SENTINEL",
+    "HOPE_PROGRESS_BODY_SENTINEL",
+    "HOPE_PROGRESS_PAYLOAD_SENTINEL",
+    "HOPE_URL_TOKEN_SENTINEL",
+    "HOPE-API-URL-SENTINEL",
+    "u_PRIVATE_UPLOAD_KEY_SENTINEL",
+    "HOPE_ABORTED_PROGRESS_REQUEST_SENTINEL",
+    "HOPE_TEST_PUBLIC_DSN_SENTINEL",
+  ]) {
+    assert.equal(payloadText.includes(privateValue), false, `Sentry payload leaked ${privateValue}`);
+  }
 });

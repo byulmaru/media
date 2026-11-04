@@ -23,6 +23,9 @@ hope:
   apiUrl: ""
   concurrency: 1
 
+sentry:
+  dsn: "https://e9085d857e20bb5d91a46e4e954c2767@o4507210007117824.ingest.us.sentry.io/4512374193979393"
+
 worker:
   hostAliases: []
 

@@ -1,5 +1,10 @@
 export { createUploadProcessingActivities } from "../src/temporal/activities";
 export { createHopeProcessingActivities } from "../src/temporal/activities";
+export {
+  createHopeObservability,
+  initializeHopeObservability,
+  parseHopeProgress,
+} from "../src/temporal/hope-observability";
 export { runWorkerGroup, startWorker } from "../src/temporal/worker";
 export { DEFAULT_MAX_BYTES } from "../src/constants";
 export { hopePreparedUploadKey } from "../src/prepared-upload";

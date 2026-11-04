@@ -60,6 +60,14 @@ spec:
               value: {{ .Values.hope.enabled | quote }}
             - name: HOPE_CONCURRENCY
               value: {{ .Values.hope.concurrency | quote }}
+            - name: SENTRY_ENVIRONMENT
+              value: production
+            - name: SENTRY_RELEASE
+              value: {{ .Values.version | quote }}
+{{ with .Values.sentry.dsn }}
+            - name: SENTRY_DSN
+              value: {{ . | quote }}
+{{ end }}
 {{ with .Values.hope.apiUrl }}
             - name: HOPE_API_URL
               value: {{ . | quote }}
