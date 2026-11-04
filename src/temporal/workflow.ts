@@ -657,7 +657,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
           if (choice) {
             const requestId = uuid4();
             hopeRequestIds.push(requestId);
-            const hope = { algorithm: "glaze", iterations: 450, intensity: 0.3 } as const;
+            const hope = { algorithm: "glaze", iterations: 300, intensity: 0.4 } as const;
             const preparationOutcome = runHopePreparation(
               validatedInput,
               requestId,

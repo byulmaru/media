@@ -1864,8 +1864,8 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
     );
     assert.deepEqual(scheduledHope.hope, {
       algorithm: "glaze",
-      iterations: 450,
-      intensity: 0.3,
+      iterations: 300,
+      intensity: 0.4,
     });
     assert.equal(media.putCounts.get(publicKey) ?? 0, 0);
     assert.equal(await Promise.race([
