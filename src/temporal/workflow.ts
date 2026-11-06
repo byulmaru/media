@@ -7,6 +7,7 @@ import {
   condition,
   defineSignal,
   getExternalWorkflowHandle,
+  isCancellation,
   log,
   patched,
   proxyActivities,
@@ -91,6 +92,16 @@ const { processUploadImage, prepareUploadImage } = proxyActivities<Pick<
     maximumInterval: "30 seconds",
     nonRetryableErrorTypes: [UPLOAD_VALIDATION_ERROR_TYPE, UPLOAD_PROCESSING_INPUT_ERROR_TYPE],
   },
+});
+
+const { generateUploadAltText } = proxyActivities<Pick<
+  ReturnType<typeof activities.createUploadProcessingActivities>,
+  "generateUploadAltText"
+>>({
+  startToCloseTimeout: "10 seconds",
+  scheduleToCloseTimeout: "10 seconds",
+  cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+  retry: { maximumAttempts: 1 },
 });
 
 const { publishPreparedUpload } = proxyActivities<Pick<
@@ -260,7 +271,7 @@ async function sendPublishUploadV2Replies(
 }
 
 async function runHopePreparation(
-  input: ProcessUploadInput,
+  input: Pick<ProcessUploadInput, "id">,
   requestId: string,
   hope: NormalizedHopeOptions,
   deadline: number,
@@ -286,12 +297,35 @@ async function runHopePreparation(
     },
   });
   await CancellationScope.withTimeout(remaining, () => prepareHopeUpload({
-    ...input,
+    id: input.id,
     requestId,
     maxEdge: HOPE_MAX_EDGE,
     hope,
   }));
   if (Date.now() >= deadline) throw uploadExpiredError();
+}
+
+async function publishWithOptionalAltText(
+  input: ProcessUploadInput,
+  publish: () => Promise<ProcessUploadResult>,
+): Promise<ProcessUploadResult> {
+  if (input.generateAltText !== true) return publish();
+
+  const caption = generateUploadAltText({ id: input.id });
+  const publication = publish();
+  const [published, generated] = await Promise.allSettled([publication, caption]);
+  if (published.status === "rejected") throw published.reason;
+  if (generated.status === "rejected" && isCancellation(generated.reason)) {
+    throw generated.reason;
+  }
+  const altText = generated.status === "fulfilled" ? generated.value : null;
+  if (altText === null) {
+    log.warn("Optional upload alt text was unavailable", {
+      event: "upload_alt_text_unavailable",
+      uploadId: input.id,
+    });
+  }
+  return { ...published.value, altText };
 }
 
 async function applyHopeWorkflow(input: ApplyHopeInput): Promise<ApplyHopeResult> {
@@ -406,6 +440,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
   let completedPublishV2Result: Extract<PublishUploadV2Result, { status: "completed" }> | undefined;
   let publishV2Failure: PublishUploadV2WorkflowFailure | undefined;
   const hopeRequestIds: string[] = [];
+  const activityInput = { id: validatedInput.id };
   let workflowFailure: unknown;
 
   try {
@@ -566,7 +601,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
       pendingHopeCommand = command;
     });
 
-    const uploadedAt = await getUploadSourceLastModified(validatedInput);
+    const uploadedAt = await getUploadSourceLastModified(activityInput);
     if (!Number.isFinite(uploadedAt) || uploadedAt <= 0 || uploadedAt > Date.now()) {
       throw uploadSourceError();
     }
@@ -591,7 +626,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
     }
 
     if (usePreparedPublication) {
-      await prepareUploadImage(validatedInput);
+      await prepareUploadImage(activityInput);
       if (Date.now() >= deadline) throw uploadExpiredError();
     }
 
@@ -616,7 +651,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
 
             if (command.hope !== null) {
               await runHopePreparation(
-                validatedInput,
+                activityInput,
                 command.requestId,
                 command.hope,
                 deadline,
@@ -703,10 +738,10 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
       publicationActivityStarted = true;
       await CancellationScope.nonCancellable(() => condition(allHandlersFinished));
       if (Date.now() >= deadline) throw uploadExpiredError();
-      const result = await publishPreparedUpload({
-        ...validatedInput,
+      const result = await publishWithOptionalAltText(validatedInput, () => publishPreparedUpload({
+        ...activityInput,
         ...(selectedHopeRequestId ? { hopeRequestId: selectedHopeRequestId } : {}),
-      });
+      }));
       completedPublishV2Result = { status: "completed", ...result };
       await sendPublishUploadV2Replies(
         validatedInput.id,
@@ -726,8 +761,11 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
 
     publicationActivityStarted = true;
     const result = usePreparedPublication
-      ? await publishPreparedUpload(validatedInput)
-      : await processUploadImage(validatedInput);
+      ? await publishWithOptionalAltText(
+        validatedInput,
+        () => publishPreparedUpload(activityInput),
+      )
+      : await processUploadImage(activityInput);
     return result;
   } catch (error) {
     workflowFailure = error;

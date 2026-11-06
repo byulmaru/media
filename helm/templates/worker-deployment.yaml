@@ -72,6 +72,12 @@ spec:
             - name: HOPE_API_URL
               value: {{ . | quote }}
 {{ end }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env
+                  key: OPENAI_API_KEY
+                  optional: true
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

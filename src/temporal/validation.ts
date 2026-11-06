@@ -38,7 +38,10 @@ const processUploadFields = {
   id: uploadIdSchema,
 };
 
-export const processUploadInputSchema = z.object(processUploadFields);
+export const processUploadInputSchema = z.object({
+  ...processUploadFields,
+  generateAltText: z.boolean().optional(),
+});
 
 export const publishPreparedUploadInputSchema = z.object({
   ...processUploadFields,
@@ -138,6 +141,7 @@ const publishUploadV2WorkflowReplySchema = z.union([
         id: uploadIdSchema,
         url: z.string().min(1),
         mediaType: z.literal("image/webp"),
+        altText: z.string().nullable().optional(),
       }),
       z.object({
         status: z.literal("processing"),

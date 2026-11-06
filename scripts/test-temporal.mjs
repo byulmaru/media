@@ -210,7 +210,7 @@ class MemoryStagingStorage {
       this.getGate.started();
       await this.getGate.promise;
     }
-    return object.bytes.slice().buffer;
+    return Uint8Array.from(object.bytes).buffer;
   }
 
   async putStream(key, body, contentLength, options) {
@@ -442,6 +442,16 @@ function deferred() {
   return { promise, resolve };
 }
 
+function freshActivityEnvironment(timeoutMs = 10_000) {
+  const scheduledAt = Date.now();
+  return new MockActivityEnvironment({
+    scheduledTimestampMs: scheduledAt,
+    currentAttemptScheduledTimestampMs: scheduledAt,
+    scheduleToCloseTimeoutMs: timeoutMs,
+    startToCloseTimeoutMs: timeoutMs,
+  });
+}
+
 function errorCauseChain(error) {
   const messages = [];
   const seen = new Set();
@@ -665,6 +675,139 @@ test("Temporal image activity applies JPEG orientation and preserves WebP transp
   assert.equal(decoded.info.width, 2);
   assert.equal(decoded.info.height, 1);
   assert.equal(decoded.data[7], 0);
+});
+
+test("Media ALT Activity sends a small private image to GPT-6 Luna and bounds the response", async () => {
+  const source = newUpload();
+  const staging = new MemoryStagingStorage();
+  const preparedBytes = await sharp({
+    create: {
+      width: 1024,
+      height: 512,
+      channels: 3,
+      background: { r: 40, g: 80, b: 160 },
+    },
+  }).webp().toBuffer();
+  const preparedObjectKey = preparedKey(source.sourceKey);
+  staging.seed(preparedObjectKey, preparedBytes, new Date(), "image/webp");
+
+  const outputText = `${"가".repeat(999)}😀x`;
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return new Response(JSON.stringify({
+      output: [{
+        type: "message",
+        content: [{ type: "output_text", text: outputText }],
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    const activities = createUploadProcessingActivities(
+      staging,
+      new MemoryMediaStorage(),
+      PUBLIC_BASE_URL,
+      "test-openai-key",
+    );
+    const altText = await freshActivityEnvironment().run(
+      activities.generateUploadAltText,
+      { id: source.id },
+    );
+
+    assert.equal(altText, `${"가".repeat(999)}😀`);
+    assert.equal(Array.from(altText).length, 1000);
+    assert.equal(request.url, "https://api.openai.com/v1/responses");
+    assert.equal(request.options.method, "POST");
+    assert.equal(request.options.headers.authorization, "Bearer test-openai-key");
+    assert.equal(request.options.signal instanceof AbortSignal, true);
+    const body = JSON.parse(request.options.body);
+    assert.equal(body.model, "gpt-6-luna");
+    assert.deepEqual(body.reasoning, { effort: "none" });
+    assert.equal(body.max_output_tokens, 256);
+    const imageInput = body.input[0].content[1];
+    assert.equal(imageInput.type, "input_image");
+    assert.equal(imageInput.detail, "low");
+    assert.equal(imageInput.image_url.startsWith("data:image/jpeg;base64,"), true);
+    const sentImage = Buffer.from(imageInput.image_url.split(",", 2)[1], "base64");
+    const sentImageInfo = await sharp(sentImage).metadata();
+    assert.equal(sentImageInfo.format, "jpeg");
+    assert(Math.max(sentImageInfo.width, sentImageInfo.height) <= 512);
+    assert.equal(staging.contentReads.get(preparedObjectKey), 1);
+    assert.equal(staging.contentReads.get(source.sourceKey) ?? 0, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Media ALT Activity returns null for missing credentials, exhausted budget, and request timeout", async () => {
+  const source = newUpload();
+  const staging = new MemoryStagingStorage();
+  const preparedBytes = await sharp(Buffer.from(PNG_1X1)).webp().toBuffer();
+  staging.seed(preparedKey(source.sourceKey), preparedBytes, new Date(), "image/webp");
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("unexpected OpenAI request");
+  };
+
+  try {
+    const missingKey = createUploadProcessingActivities(
+      staging,
+      new MemoryMediaStorage(),
+      PUBLIC_BASE_URL,
+    );
+    assert.equal(await missingKey.generateUploadAltText({ id: source.id }), null);
+    assert.equal(fetchCalls, 0);
+
+    const activities = createUploadProcessingActivities(
+      staging,
+      new MemoryMediaStorage(),
+      PUBLIC_BASE_URL,
+      "test-openai-key",
+    );
+    const now = Date.now();
+    const exhaustedBudget = new MockActivityEnvironment({
+      scheduledTimestampMs: now - 20,
+      currentAttemptScheduledTimestampMs: now - 20,
+      scheduleToCloseTimeoutMs: 10,
+      startToCloseTimeoutMs: 10,
+    });
+    assert.equal(await exhaustedBudget.run(activities.generateUploadAltText, { id: source.id }), null);
+    assert.equal(fetchCalls, 0);
+
+    globalThis.fetch = async (_url, options) => {
+      fetchCalls += 1;
+      assert.equal(options.signal instanceof AbortSignal, true);
+      throw new DOMException("request timed out", "TimeoutError");
+    };
+    assert.equal(await freshActivityEnvironment().run(
+      activities.generateUploadAltText,
+      { id: source.id },
+    ), null);
+    assert.equal(fetchCalls, 1);
+
+    for (const response of [
+      new Response("provider error", { status: 503 }),
+      new Response(JSON.stringify({ output: [] }), { status: 200 }),
+      new Response("not json", { status: 200 }),
+      new Response(JSON.stringify({ output: [{ type: "message", content: "invalid" }] }), { status: 200 }),
+    ]) {
+      globalThis.fetch = async () => {
+        fetchCalls += 1;
+        return response;
+      };
+      assert.equal(await freshActivityEnvironment().run(
+        activities.generateUploadAltText,
+        { id: source.id },
+      ), null);
+    }
+    assert.equal(fetchCalls, 5);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("legacy prepared WebP objects without ThumbHash are reused without backfill", async () => {
@@ -1761,6 +1904,268 @@ test("Nexus publishUploadV2 waits for public completion and shares an unfiltered
     assert.deepEqual(workerFailures, []);
   } finally {
     publicationGate.resolve();
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
+test("Nexus opt-in ALT waits for publication and remains optional for existing callers", async () => {
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const endpointName = `media-alt-text-test-${randomUUID()}`;
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
+  const captionActivityStarted = deferred();
+  const captionStarted = deferred();
+  const captionGate = deferred();
+  const publicationStarted = deferred();
+  const publicationGate = deferred();
+  const captionFailureIds = new Set();
+  const captionActivityCalls = [];
+  let captionGateUploadId;
+  let worker;
+
+  try {
+    const baseActivities = createUploadProcessingActivities(
+      staging,
+      media,
+      PUBLIC_BASE_URL,
+      "test-openai-key",
+    );
+    const activities = {
+      ...baseActivities,
+      async generateUploadAltText(input) {
+        captionActivityCalls.push(input.id);
+        captionActivityStarted.resolve();
+        if (captionFailureIds.has(input.id)) throw new Error("injected caption timeout");
+        const originalActivityFetch = globalThis.fetch;
+        globalThis.fetch = async (url) => {
+          assert.equal(url, "https://api.openai.com/v1/responses");
+          captionStarted.resolve();
+          if (input.id === captionGateUploadId) await captionGate.promise;
+          return new Response(JSON.stringify({
+            output: [{ type: "message", content: [{ type: "output_text", text: "산책로에서 걷는 사람" }] }],
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        };
+        try {
+          return await baseActivities.generateUploadAltText(input);
+        } finally {
+          globalThis.fetch = originalActivityFetch;
+        }
+      },
+    };
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      activities,
+      [createMediaServiceHandler({ hopeEnabled: true })],
+    );
+
+    const source = newUpload();
+    captionGateUploadId = source.id;
+    const publicKey = `original/${source.id}.webp`;
+    staging.seed(source.sourceKey, PNG_1X1);
+    const uploadCaller = await startCaller(
+      environment,
+      endpointName,
+      { ...uploadInput(source.id), generateAltText: true },
+      `alt-text-upload:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(environment, staging, source.id, source.sourceKey);
+    assert.equal(captionActivityCalls.length, 0, "caption started before the publish request");
+
+    media.putGate = {
+      key: publicKey,
+      started: publicationStarted.resolve,
+      promise: publicationGate.promise,
+    };
+    const publishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, applyAiProhibitFilter: false },
+      `alt-text-publish:${randomUUID()}`,
+      "5 seconds",
+    );
+    let publishSettled = false;
+    const publishResultPromise = publishCaller.result().finally(() => { publishSettled = true; });
+    await withTimeout(
+      captionActivityStarted.promise,
+      WORKFLOW_TIMEOUT_MS,
+      "caption Activity did not start after the publish request",
+    );
+    await withTimeout(
+      captionStarted.promise,
+      WORKFLOW_TIMEOUT_MS,
+      "ALT request did not start within Activity budget",
+    );
+    await withTimeout(publicationStarted.promise, WORKFLOW_TIMEOUT_MS, "publication did not start alongside ALT");
+    assert.deepEqual(captionActivityCalls, [source.id]);
+
+    publicationGate.resolve();
+    await waitFor(() => media.objects.has(publicKey), "publication did not finish");
+    await delay(0);
+    assert.equal(publishSettled, false, "completed result returned before the bounded caption settled");
+    captionGate.resolve();
+
+    const expectedAltResult = {
+      id: source.id,
+      url: `${PUBLIC_BASE_URL}/${publicKey}`,
+      mediaType: "image/webp",
+      altText: "산책로에서 걷는 사람",
+    };
+    assert.deepEqual(await withTimeout(publishResultPromise, WORKFLOW_TIMEOUT_MS, "v2 result did not finish"), {
+      result: { status: "completed", ...expectedAltResult },
+    });
+    assert.deepEqual(await withTimeout(uploadCaller.result(), WORKFLOW_TIMEOUT_MS, "startUpload did not finish"), {
+      upload: expectedAltResult,
+      publishResults: [],
+    });
+    assert.deepEqual(
+      staging.deleteKeys.filter((key) => key === preparedKey(source.sourceKey) || key === source.sourceKey),
+      [preparedKey(source.sourceKey), source.sourceKey],
+    );
+
+    media.putGate = undefined;
+    for (const [label, generateAltText] of [["false", false], ["omitted", undefined]]) {
+      const disabled = newUpload();
+      staging.seed(disabled.sourceKey, PNG_1X1);
+      const disabledCaller = await startCaller(
+        environment,
+        endpointName,
+        {
+          ...uploadInput(disabled.id),
+          ...(generateAltText === undefined ? {} : { generateAltText }),
+        },
+        `alt-text-${label}:${randomUUID()}`,
+      );
+      await awaitUploadWorkflowWaiting(environment, staging, disabled.id, disabled.sourceKey);
+      await disabledCaller.signal("finishNexusUploadTest");
+      assert.deepEqual(await withTimeout(
+        disabledCaller.result(),
+        WORKFLOW_TIMEOUT_MS,
+        `${label} upload did not finish`,
+      ), {
+        upload: {
+          id: disabled.id,
+          url: `${PUBLIC_BASE_URL}/original/${disabled.id}.webp`,
+          mediaType: "image/webp",
+        },
+        publishResults: [{ id: disabled.id }, { id: disabled.id }],
+      });
+    }
+    assert.deepEqual(captionActivityCalls, [source.id]);
+
+    const captionFailure = newUpload();
+    captionFailureIds.add(captionFailure.id);
+    staging.seed(captionFailure.sourceKey, PNG_1X1);
+    const captionFailureUpload = await startCaller(
+      environment,
+      endpointName,
+      { ...uploadInput(captionFailure.id), generateAltText: true },
+      `alt-text-failure-upload:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(
+      environment,
+      staging,
+      captionFailure.id,
+      captionFailure.sourceKey,
+    );
+    const captionFailurePublish = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: captionFailure.id, applyAiProhibitFilter: false },
+      `alt-text-failure-publish:${randomUUID()}`,
+      "5 seconds",
+    );
+    const captionFailurePublicKey = `original/${captionFailure.id}.webp`;
+    assert.deepEqual(await withTimeout(
+      captionFailurePublish.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "publication failed when caption activity timed out",
+    ), {
+      result: {
+        status: "completed",
+        id: captionFailure.id,
+        url: `${PUBLIC_BASE_URL}/${captionFailurePublicKey}`,
+        mediaType: "image/webp",
+        altText: null,
+      },
+    });
+    assert.deepEqual(await withTimeout(
+      captionFailureUpload.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "startUpload failed when caption activity timed out",
+    ), {
+      upload: {
+        id: captionFailure.id,
+        url: `${PUBLIC_BASE_URL}/${captionFailurePublicKey}`,
+        mediaType: "image/webp",
+        altText: null,
+      },
+      publishResults: [],
+    });
+    assert.equal(media.objects.has(captionFailurePublicKey), true);
+    assert.equal(staging.objects.has(captionFailure.sourceKey), false);
+    assert.equal(staging.objects.has(preparedKey(captionFailure.sourceKey)), false);
+
+    const failedPublication = newUpload();
+    staging.seed(failedPublication.sourceKey, PNG_1X1);
+    const failedPublicKey = `original/${failedPublication.id}.webp`;
+    const failedPublicationUpload = await startCaller(
+      environment,
+      endpointName,
+      { ...uploadInput(failedPublication.id), generateAltText: true },
+      `alt-text-public-failure-upload:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(
+      environment,
+      staging,
+      failedPublication.id,
+      failedPublication.sourceKey,
+    );
+    media.failStreamKey = failedPublicKey;
+    media.failStreamError = ApplicationFailure.create({
+      message: "injected terminal publication failure",
+      type: "UploadProcessingInputError",
+      nonRetryable: true,
+    });
+    const failedPublicationCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: failedPublication.id, applyAiProhibitFilter: false },
+      `alt-text-public-failure-publish:${randomUUID()}`,
+      "5 seconds",
+    );
+    const failedPublicationPublishResult = await withTimeout(
+      failedPublicationCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "caption branch swallowed publication failure",
+    );
+    assert.match(failedPublicationPublishResult.error, /UploadProcessingInputError/);
+    const failedPublicationUploadResult = await withTimeout(
+      failedPublicationUpload.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "upload did not retain publication failure",
+    );
+    assert.match(failedPublicationUploadResult.error, /injected terminal publication failure/i);
+    assert.equal(media.objects.has(failedPublicKey), false);
+    assert.equal(staging.objects.has(failedPublication.sourceKey), false);
+    assert.equal(staging.objects.has(preparedKey(failedPublication.sourceKey)), false);
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    publicationGate.resolve();
+    captionGate.resolve();
     if (worker) await stopWorker(worker).catch(() => undefined);
     await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
     await environment.teardown();

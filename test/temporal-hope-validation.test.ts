@@ -8,6 +8,7 @@ import {
   parseHopeProcessingInput,
   parseProcessUploadInput,
   parsePublishPreparedUploadInput,
+  parsePublishUploadV2WorkflowReply,
   parseUploadSourceCleanupInput,
 } from "../src/temporal/validation";
 
@@ -42,6 +43,45 @@ describe("Temporal upload input validation", () => {
       maxBytes: 1,
       maxDimension: 1,
     })).toEqual(input);
+  });
+
+  it("keeps ALT generation opt-in and rejects non-boolean values", () => {
+    expect(parseProcessUploadInput({ id: uploadId })).toEqual({ id: uploadId });
+    expect(parseProcessUploadInput({ id: uploadId, generateAltText: false })).toEqual({
+      id: uploadId,
+      generateAltText: false,
+    });
+    expect(parseProcessUploadInput({ id: uploadId, generateAltText: true })).toEqual({
+      id: uploadId,
+      generateAltText: true,
+    });
+    expect(parseProcessUploadInput({ id: uploadId, generateAltText: "true" })).toBeUndefined();
+  });
+});
+
+describe("publishUploadV2 ALT result validation", () => {
+  const requestId = "00000000-0000-4000-8000-000000000001";
+
+  it.each(["산책로에서 걷는 사람", null])("preserves optional ALT result %s", (altText) => {
+    expect(parsePublishUploadV2WorkflowReply(uploadId, requestId, {
+      requestId,
+      result: {
+        status: "completed",
+        id: uploadId,
+        url: "https://media.example.com/original/upload.webp",
+        mediaType: "image/webp",
+        altText,
+      },
+    })).toEqual({
+      requestId,
+      result: {
+        status: "completed",
+        id: uploadId,
+        url: "https://media.example.com/original/upload.webp",
+        mediaType: "image/webp",
+        altText,
+      },
+    });
   });
 });
 

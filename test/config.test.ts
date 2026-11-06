@@ -76,6 +76,12 @@ describe("Temporal upload configuration", () => {
     const parsed = temporalUploadConfigSchema.safeParse(config);
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.HOPE_CONCURRENCY).toBe(1);
+    const withOpenAiKey = temporalUploadConfigSchema.safeParse({
+      ...config,
+      OPENAI_API_KEY: "test-openai-key",
+    });
+    expect(withOpenAiKey.success).toBe(true);
+    if (withOpenAiKey.success) expect(withOpenAiKey.data.OPENAI_API_KEY).toBe("test-openai-key");
     expect(temporalUploadConfigSchema.safeParse({
       ...config,
       R2_STAGING_BUCKET_NAME: config.R2_BUCKET_NAME,
