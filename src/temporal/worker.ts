@@ -82,7 +82,12 @@ export async function startWorker(source: NodeJS.ProcessEnv = process.env): Prom
       workflowBundle: {
         codePath: fileURLToPath(new URL("./workflows.js", import.meta.url)),
       },
-      activities: createUploadProcessingActivities(staging, media, config.PUBLIC_BASE_URL),
+      activities: createUploadProcessingActivities(
+        staging,
+        media,
+        config.PUBLIC_BASE_URL,
+        config.OPENAI_API_KEY,
+      ),
       nexusServices: [createMediaServiceHandler({ hopeEnabled: config.HOPE_ENABLED })],
       maxConcurrentActivityTaskExecutions: 4,
     }));

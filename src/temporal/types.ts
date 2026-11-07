@@ -42,12 +42,14 @@ export const UPLOAD_VALIDATION_CODES = [
 
 export interface ProcessUploadInput {
   id: string;
+  generateAltText?: boolean;
 }
 
 export interface ProcessUploadResult {
   id: string;
   url: string;
   mediaType: "image/webp";
+  altText?: string | null;
 }
 
 export interface PublishUploadInput {
@@ -73,7 +75,13 @@ export interface PublishUploadV2WorkflowInput extends NormalizedPublishUploadV2I
 }
 
 export type PublishUploadV2Result =
-  | { status: "completed"; id: string; url: string; mediaType: "image/webp" }
+  | {
+      status: "completed";
+      id: string;
+      url: string;
+      mediaType: "image/webp";
+      altText?: string | null;
+    }
   | { status: "processing"; id: string };
 
 export interface PublishUploadV2RequestSignal {
@@ -91,7 +99,8 @@ export type PublishUploadV2WorkflowReply =
   | { requestId: string; result: PublishUploadV2Result }
   | { requestId: string; error: PublishUploadV2WorkflowFailure };
 
-export interface PublishPreparedUploadInput extends ProcessUploadInput {
+export interface PublishPreparedUploadInput {
+  id: string;
   hopeRequestId?: string;
 }
 
@@ -120,7 +129,8 @@ export interface ApplyHopeResult {
   hope: NormalizedHopeOptions | null;
 }
 
-export interface HopeProcessingInput extends ProcessUploadInput {
+export interface HopeProcessingInput {
+  id: string;
   requestId: string;
   maxEdge: typeof HOPE_MAX_EDGE;
   hope: NormalizedHopeOptions;

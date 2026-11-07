@@ -74,6 +74,33 @@ type HopeHttpRequestOptions = {
 
 type HopeHttpRequest = (url: URL, options: HopeHttpRequestOptions) => Promise<HopeHttpResponse>;
 
+const openAiResponsesUrl = "https://api.openai.com/v1/responses";
+
+function extractAltText(response: unknown): string | null {
+  if (typeof response !== "object" || response === null || !("output" in response)) {
+    return null;
+  }
+  const output = response.output;
+  if (!Array.isArray(output)) return null;
+
+  const text = output.flatMap((item: unknown) => {
+    if (
+      typeof item !== "object" || item === null || !("type" in item) ||
+      item.type !== "message" || !("content" in item) || !Array.isArray(item.content)
+    ) {
+      return [];
+    }
+    return item.content.flatMap((part: unknown) =>
+      typeof part === "object" && part !== null && "type" in part &&
+      part.type === "output_text" && "text" in part && typeof part.text === "string"
+        ? [part.text]
+        : []
+    );
+  }).join("").trim();
+
+  return text ? Array.from(text).slice(0, 1000).join("").trim() || null : null;
+}
+
 const requestHope: HopeHttpRequest = (url, options) => new Promise((resolve, reject) => {
   const request = httpsRequest(url, {
     method: options.method,
@@ -440,6 +467,7 @@ export function createUploadProcessingActivities(
   staging: UploadStagingStorage,
   media: Pick<R2S3MediaStorage, "head" | "putStream">,
   publicBaseUrl: string,
+  openAiApiKey?: string,
 ) {
   async function publishPreparedUpload(input: PublishPreparedUploadInput): Promise<ProcessUploadResult> {
     const outputKey = `original/${input.id}.webp`;
@@ -498,6 +526,74 @@ export function createUploadProcessingActivities(
         await ensurePreparedUpload(staging, input);
       } catch (error) {
         throw asNonRetryableValidationFailure(error) ?? error;
+      }
+    },
+
+    async generateUploadAltText(rawInput: ProcessUploadInput): Promise<string | null> {
+      const input = parseProcessUploadInput(rawInput);
+      if (!input) throw invalidProcessingInput();
+      const apiKey = openAiApiKey?.trim();
+      if (!apiKey) return null;
+
+      const { cancellationSignal, info } = Context.current();
+      try {
+        const prepared = await staging.get(
+          preparedUploadKey(uploadSourceKey(input.id)),
+          DEFAULT_MAX_BYTES,
+        );
+        cancellationSignal.throwIfAborted();
+        const image = await sharp(Buffer.from(prepared), { limitInputPixels: MAX_PIXELS })
+          .rotate()
+          .resize({ width: 512, height: 512, fit: "inside", withoutEnlargement: true })
+          .webp({ quality: 80 })
+          .toBuffer();
+        cancellationSignal.throwIfAborted();
+        const deadline = Math.min(
+          info.scheduledTimestampMs + info.scheduleToCloseTimeoutMs,
+          info.currentAttemptScheduledTimestampMs + info.startToCloseTimeoutMs,
+        );
+        const remainingMs = Math.floor(deadline - Date.now());
+        if (remainingMs <= 0) return null;
+
+        const response = await fetch(openAiResponsesUrl, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "gpt-6-luna",
+            reasoning: { effort: "none" },
+            max_output_tokens: 256,
+            input: [{
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: "이미지에 실제로 보이는 대상이나 장면만 짧은 한국어 대체 텍스트(ALT) 한 문장으로 설명하세요. 사람이나 캐릭터의 정체, 관계, 의도는 추측하지 마세요. 설명 외 문장, 마크다운, 따옴표, 머리말 없이 텍스트만 출력하세요.",
+                },
+                {
+                  type: "input_image",
+                  image_url: `data:image/webp;base64,${image.toString("base64")}`,
+                  detail: "low",
+                },
+              ],
+            }],
+          }),
+          signal: AbortSignal.any([
+            AbortSignal.timeout(Math.min(8_000, remainingMs)),
+            cancellationSignal,
+          ]),
+        });
+        cancellationSignal.throwIfAborted();
+        if (!response.ok) return null;
+
+        const result = await response.json();
+        cancellationSignal.throwIfAborted();
+        return extractAltText(result);
+      } catch {
+        cancellationSignal.throwIfAborted();
+        return null;
       }
     },
 
