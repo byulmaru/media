@@ -545,7 +545,7 @@ export function createUploadProcessingActivities(
         const image = await sharp(Buffer.from(prepared), { limitInputPixels: MAX_PIXELS })
           .rotate()
           .resize({ width: 512, height: 512, fit: "inside", withoutEnlargement: true })
-          .jpeg({ quality: 80 })
+          .webp({ quality: 80 })
           .toBuffer();
         cancellationSignal.throwIfAborted();
         const deadline = Math.min(
@@ -574,7 +574,7 @@ export function createUploadProcessingActivities(
                 },
                 {
                   type: "input_image",
-                  image_url: `data:image/jpeg;base64,${image.toString("base64")}`,
+                  image_url: `data:image/webp;base64,${image.toString("base64")}`,
                   detail: "low",
                 },
               ],

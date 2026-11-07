@@ -729,10 +729,10 @@ test("Media ALT Activity sends a small private image to GPT-6 Luna and bounds th
     const imageInput = body.input[0].content[1];
     assert.equal(imageInput.type, "input_image");
     assert.equal(imageInput.detail, "low");
-    assert.equal(imageInput.image_url.startsWith("data:image/jpeg;base64,"), true);
+    assert.equal(imageInput.image_url.startsWith("data:image/webp;base64,"), true);
     const sentImage = Buffer.from(imageInput.image_url.split(",", 2)[1], "base64");
     const sentImageInfo = await sharp(sentImage).metadata();
-    assert.equal(sentImageInfo.format, "jpeg");
+    assert.equal(sentImageInfo.format, "webp");
     assert(Math.max(sentImageInfo.width, sentImageInfo.height) <= 512);
     assert.equal(staging.contentReads.get(preparedObjectKey), 1);
     assert.equal(staging.contentReads.get(source.sourceKey) ?? 0, 0);
