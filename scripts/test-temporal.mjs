@@ -291,7 +291,10 @@ class MemoryMediaStorage {
       return null;
     }
     const object = this.objects.get(key);
-    return object ? { httpMetadata: object.httpMetadata } : null;
+    return object ? {
+      httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
+    } : null;
   }
 
   async putStream(key, body, contentLength, options) {
@@ -324,6 +327,7 @@ class MemoryMediaStorage {
     this.objects.set(key, {
       bytes,
       httpMetadata: options.httpMetadata,
+      customMetadata: options.customMetadata,
     });
     if (this.failAfterCommitKey === key) {
       this.failAfterCommitKey = undefined;
@@ -424,6 +428,41 @@ function decodeThumbhash(value) {
   const bytes = Buffer.from(value, "base64");
   assert(bytes.byteLength > 0);
   return Uint8Array.from(bytes);
+}
+
+function parseWebpChunks(bytes) {
+  assert.equal(bytes.toString("ascii", 0, 4), "RIFF");
+  assert.equal(bytes.toString("ascii", 8, 12), "WEBP");
+  assert.equal(bytes.readUInt32LE(4), bytes.byteLength - 8);
+  const chunks = [];
+  for (let offset = 12; offset < bytes.byteLength;) {
+    const size = bytes.readUInt32LE(offset + 4);
+    const end = offset + 8 + size + (size & 1);
+    assert(end <= bytes.byteLength);
+    chunks.push({ fourCC: bytes.toString("ascii", offset, offset + 4), start: offset, end, size });
+    offset = end;
+  }
+  return chunks;
+}
+
+function webpWithoutVp8x(bytes) {
+  const chunks = parseWebpChunks(bytes);
+  const withoutVp8x = Buffer.concat([
+    Buffer.from(bytes.subarray(0, 12)),
+    ...chunks.filter(({ fourCC }) => fourCC !== "VP8X")
+      .map(({ start, end }) => bytes.subarray(start, end)),
+  ]);
+  withoutVp8x.writeUInt32LE(withoutVp8x.byteLength - 8, 4);
+  return withoutVp8x;
+}
+
+function webpWithJunkChunk(bytes, payloadLength) {
+  const chunk = Buffer.alloc(8 + payloadLength + (payloadLength & 1));
+  chunk.write("JUNK", 0, "ascii");
+  chunk.writeUInt32LE(payloadLength, 4);
+  const result = Buffer.concat([bytes, chunk]);
+  result.writeUInt32LE(result.byteLength - 8, 4);
+  return result;
 }
 
 function withTimeout(promise, timeoutMs, message) {
@@ -689,6 +728,203 @@ test("legacy prepared WebP objects without ThumbHash are reused without backfill
   await activities.publishPreparedUpload(input);
   const published = media.objects.get(`original/${source.id}.webp`);
   assert.deepEqual(published.bytes, bytes);
+});
+
+test("metadata publication muxes XMP without changing image chunks and confirms metadata retries", async () => {
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const activities = createUploadProcessingActivities(staging, media, PUBLIC_BASE_URL);
+  const source = newUpload();
+  const preparedKeyValue = preparedKey(source.sourceKey);
+  const outputKey = `original/${source.id}.webp`;
+  const preparedWebp = await sharp(PNG_RGBA_2X1).webp().toBuffer();
+  const metadata = {
+    credit: "Jiyu & <publisher>",
+    sourceUrl: "https://media.example/posts/one?view=full&lang=ko",
+    copyright: "© Jiyu <all rights>",
+    usageTerms: "Use & share only with permission",
+    webStatement: "https://media.example/terms?media=image&rights=1",
+  };
+  staging.seed(preparedKeyValue, preparedWebp, new Date(), "image/webp");
+
+  const result = await activities.publishPreparedUpload({ id: source.id, metadata });
+  const published = media.objects.get(outputKey);
+  assert(published);
+  assert.deepEqual(result.metadata, metadata);
+  const marker = published.customMetadata?.["publication-metadata-sha256"];
+  assert.match(marker ?? "", /^[a-f0-9]{64}$/);
+
+  const sourceChunks = parseWebpChunks(preparedWebp);
+  const publishedChunks = parseWebpChunks(published.bytes);
+  assert.equal(publishedChunks[0].fourCC, "VP8X");
+  const publishedVp8x = publishedChunks[0];
+  assert.equal((published.bytes[publishedVp8x.start + 8] & 0x04) !== 0, true);
+  const sourceVp8x = sourceChunks.find(({ fourCC }) => fourCC === "VP8X");
+  if (sourceVp8x) {
+    const expectedVp8x = Buffer.from(preparedWebp.subarray(sourceVp8x.start, sourceVp8x.end));
+    expectedVp8x[8] |= 0x04;
+    assert.deepEqual(
+      published.bytes.subarray(publishedVp8x.start, publishedVp8x.end),
+      expectedVp8x,
+    );
+  }
+  assert.equal(publishedChunks.filter(({ fourCC }) => fourCC === "XMP ").length, 1);
+  assert.deepEqual(
+    publishedChunks
+      .filter(({ fourCC }) => fourCC !== "VP8X" && fourCC !== "XMP ")
+      .map(({ start, end }) => published.bytes.subarray(start, end)),
+    sourceChunks
+      .filter(({ fourCC }) => fourCC !== "VP8X" && fourCC !== "XMP ")
+      .map(({ start, end }) => preparedWebp.subarray(start, end)),
+  );
+
+  const xmpChunk = publishedChunks.find(({ fourCC }) => fourCC === "XMP ");
+  const xmp = published.bytes.toString("utf8", xmpChunk.start + 8, xmpChunk.start + 8 + xmpChunk.size);
+  assert.match(xmp, /<photoshop:Credit>Jiyu &amp; &lt;publisher&gt;<\/photoshop:Credit>/);
+  assert.match(xmp, /<dc:relation><rdf:Bag><rdf:li>https:\/\/media\.example\/posts\/one\?view=full&amp;lang=ko<\/rdf:li><\/rdf:Bag><\/dc:relation>/);
+  assert.match(xmp, /<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">© Jiyu &lt;all rights&gt;<\/rdf:li><\/rdf:Alt><\/dc:rights>/);
+  assert.match(xmp, /<xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">Use &amp; share only with permission<\/rdf:li><\/rdf:Alt><\/xmpRights:UsageTerms>/);
+  assert.match(xmp, /<xmpRights:WebStatement rdf:resource="https:\/\/media\.example\/terms\?media=image&amp;rights=1"\/>/);
+  assert.match(xmp, /<plus:DataMining>http:\/\/ns\.useplus\.org\/ldf\/vocab\/DMI-PROHIBITED-AIMLTRAINING<\/plus:DataMining>/);
+  assert.doesNotMatch(xmp, /photoshop:Source|dc:creator|xmpMM:DerivedFrom/);
+  assert.equal(media.streams.get(outputKey).destroyed, true);
+  const sourcePixels = await sharp(preparedWebp).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const publishedPixels = await sharp(published.bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  assert.deepEqual(publishedPixels.info, sourcePixels.info);
+  assert.deepEqual(publishedPixels.data, sourcePixels.data);
+
+  assert.deepEqual(await activities.publishPreparedUpload({ id: source.id, metadata }), {
+    id: source.id,
+    url: `${PUBLIC_BASE_URL}/${outputKey}`,
+    mediaType: "image/webp",
+    metadata,
+  });
+  assert.equal(media.putCounts.get(outputKey), 1);
+
+  for (const [label, customMetadata] of [
+    ["missing marker", undefined],
+    ["mismatched marker", { "publication-metadata-sha256": "0".repeat(64) }],
+  ]) {
+    const existing = newUpload();
+    const existingKey = `original/${existing.id}.webp`;
+    const existingObject = {
+      bytes: Buffer.from("existing public object"),
+      httpMetadata: { contentType: "image/webp" },
+      customMetadata,
+    };
+    media.objects.set(existingKey, existingObject);
+    await assert.rejects(
+      activities.publishPreparedUpload({ id: existing.id, metadata }),
+      (error) => error.type === "MediaUploadMetadataConflict",
+      `${label} must reject metadata publication`,
+    );
+    assert.deepEqual(media.objects.get(existingKey), existingObject);
+  }
+
+  const racing = newUpload();
+  const racingPreparedKey = preparedKey(racing.sourceKey);
+  const racingPublicKey = `original/${racing.id}.webp`;
+  staging.seed(racingPreparedKey, preparedWebp, new Date(), "image/webp");
+  const winningObject = {
+    bytes: published.bytes,
+    httpMetadata: published.httpMetadata,
+    customMetadata: published.customMetadata,
+  };
+  media.objects.set(racingPublicKey, winningObject);
+  media.conflictKey = racingPublicKey;
+  media.conflictHeadMisses = 1;
+  assert.deepEqual(
+    await activities.publishPreparedUpload({ id: racing.id, metadata }),
+    {
+      id: racing.id,
+      url: `${PUBLIC_BASE_URL}/${racingPublicKey}`,
+      mediaType: "image/webp",
+      metadata,
+    },
+  );
+  assert.deepEqual(media.objects.get(racingPublicKey), winningObject);
+  assert.equal(media.streams.get(racingPublicKey).destroyed, true);
+
+  const mismatchedRace = newUpload();
+  const mismatchedPreparedKey = preparedKey(mismatchedRace.sourceKey);
+  const mismatchedPublicKey = `original/${mismatchedRace.id}.webp`;
+  const mismatchedWinner = {
+    bytes: Buffer.from("competing public object"),
+    httpMetadata: { contentType: "image/webp" },
+    customMetadata: { "publication-metadata-sha256": "0".repeat(64) },
+  };
+  staging.seed(mismatchedPreparedKey, preparedWebp, new Date(), "image/webp");
+  media.objects.set(mismatchedPublicKey, mismatchedWinner);
+  media.conflictKey = mismatchedPublicKey;
+  media.conflictHeadMisses = 1;
+  await assert.rejects(
+    activities.publishPreparedUpload({ id: mismatchedRace.id, metadata }),
+    (error) => error.type === "MediaUploadMetadataConflict",
+  );
+  assert.deepEqual(media.objects.get(mismatchedPublicKey), mismatchedWinner);
+  assert.equal(media.streams.get(mismatchedPublicKey).destroyed, true);
+
+  const simple = newUpload();
+  const simplePreparedKey = preparedKey(simple.sourceKey);
+  const simplePublicKey = `original/${simple.id}.webp`;
+  const simpleWebp = webpWithoutVp8x(await sharp(PNG_1X1).webp().toBuffer());
+  assert.equal(parseWebpChunks(simpleWebp).some(({ fourCC }) => fourCC === "VP8X"), false);
+  const simpleMetadata = {
+    credit: "Artist",
+    sourceUrl: "https://media.example/posts/simple",
+  };
+  staging.seed(simplePreparedKey, simpleWebp, new Date(), "image/webp");
+  const simpleResult = await activities.publishPreparedUpload({ id: simple.id, metadata: simpleMetadata });
+  assert.deepEqual(simpleResult.metadata, simpleMetadata);
+  const simplePublished = media.objects.get(simplePublicKey);
+  const simpleChunks = parseWebpChunks(simplePublished.bytes);
+  assert.equal(simpleChunks[0].fourCC, "VP8X");
+  assert.equal((simplePublished.bytes[simpleChunks[0].start + 8] & 0x04) !== 0, true);
+  assert.deepEqual(
+    simpleChunks
+      .filter(({ fourCC }) => fourCC !== "VP8X" && fourCC !== "XMP ")
+      .map(({ start, end }) => simplePublished.bytes.subarray(start, end)),
+    parseWebpChunks(simpleWebp)
+      .filter(({ fourCC }) => fourCC !== "VP8X" && fourCC !== "XMP ")
+      .map(({ start, end }) => simpleWebp.subarray(start, end)),
+  );
+  const simpleSourcePixels = await sharp(simpleWebp).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const simplePublishedPixels = await sharp(simplePublished.bytes)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  assert.deepEqual(simplePublishedPixels.info, simpleSourcePixels.info);
+  assert.deepEqual(simplePublishedPixels.data, simpleSourcePixels.data);
+  const simpleXmp = simplePublished.bytes.toString(
+    "utf8",
+    simpleChunks.find(({ fourCC }) => fourCC === "XMP ").start + 8,
+    simpleChunks.find(({ fourCC }) => fourCC === "XMP ").start + 8 +
+      simpleChunks.find(({ fourCC }) => fourCC === "XMP ").size,
+  );
+  assert.doesNotMatch(simpleXmp, /dc:rights|xmpRights:UsageTerms|xmpRights:WebStatement/);
+
+  const large = newUpload();
+  const largePreparedKey = preparedKey(large.sourceKey);
+  const largePublicKey = `original/${large.id}.webp`;
+  const largeWebp = webpWithJunkChunk(simpleWebp, DEFAULT_MAX_BYTES + 1);
+  const largeMetadata = {
+    credit: "Artist",
+    sourceUrl: "https://media.example/posts/large",
+  };
+  staging.seed(largePreparedKey, largeWebp, new Date(), "image/webp");
+  const largeResult = await activities.publishPreparedUpload({ id: large.id, metadata: largeMetadata });
+  assert.deepEqual(largeResult.metadata, largeMetadata);
+  const largePublished = media.objects.get(largePublicKey);
+  assert(largePublished.bytes.byteLength > DEFAULT_MAX_BYTES);
+  const largeChunks = parseWebpChunks(largePublished.bytes);
+  const publishedJunk = largeChunks.find(({ fourCC }) => fourCC === "JUNK");
+  const sourceJunk = parseWebpChunks(largeWebp).find(({ fourCC }) => fourCC === "JUNK");
+  assert(publishedJunk);
+  assert(sourceJunk);
+  assert.deepEqual(
+    largePublished.bytes.subarray(publishedJunk.start, publishedJunk.end),
+    largeWebp.subarray(sourceJunk.start, sourceJunk.end),
+  );
 });
 
 test("ThumbHash generation bounds large images while preserving their aspect ratio", async () => {
@@ -1767,6 +2003,128 @@ test("Nexus publishUploadV2 waits for public completion and shares an unfiltered
   }
 });
 
+test("Nexus publishUploadV2 fixes metadata selection and returns the applied receipt", async () => {
+  const workflowBundle = await bundleWorkflowCode({
+    workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
+  });
+  const executable = process.env.TEMPORAL_CLI_PATH
+    ? { type: "existing-path", path: process.env.TEMPORAL_CLI_PATH }
+    : { type: "cached-download" };
+  const environment = await TestWorkflowEnvironment.createLocal({ server: { executable } });
+  const staging = new MemoryStagingStorage();
+  const media = new MemoryMediaStorage();
+  const workerFailures = [];
+  const endpointName = "media-publish-v2-metadata-test-" + randomUUID();
+  const endpoint = await environment.createNexusEndpoint(endpointName, TASK_QUEUE);
+  const publicationStarted = deferred();
+  const publicationGate = deferred();
+  let worker;
+
+  try {
+    worker = await startWorker(
+      environment,
+      workflowBundle,
+      staging,
+      media,
+      workerFailures,
+      undefined,
+      [createMediaServiceHandler({ hopeEnabled: true })],
+    );
+    const source = newUpload();
+    const publicKey = `original/${source.id}.webp`;
+    const metadata = {
+      credit: "Artist and public profile",
+      sourceUrl: "https://social.example/@artist/posts/123",
+    };
+    staging.seed(source.sourceKey, PNG_1X1);
+    const uploadCaller = await startCaller(
+      environment,
+      endpointName,
+      uploadInput(source.id, source.sourceKey),
+      `publish-v2-metadata-upload:${randomUUID()}`,
+    );
+    await awaitUploadWorkflowWaiting(environment, staging, source.id, source.sourceKey);
+    media.putGate = {
+      key: publicKey,
+      started: publicationStarted.resolve,
+      promise: publicationGate.promise,
+    };
+
+    const publishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, applyAiProhibitFilter: false, metadata },
+      `publish-v2-metadata:${randomUUID()}`,
+      "5 seconds",
+    );
+    const publishOutcomePromise = publishCaller.result().then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await withTimeout(publicationStarted.promise, WORKFLOW_TIMEOUT_MS, "metadata public write did not start");
+
+    const duplicatePublishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      { id: source.id, metadata },
+      `publish-v2-metadata-duplicate:${randomUUID()}`,
+      "5 seconds",
+    );
+    const conflictingPublishCaller = await startPublishUploadV2Caller(
+      environment,
+      endpointName,
+      {
+        id: source.id,
+        metadata: { ...metadata, credit: "Different artist" },
+      },
+      `publish-v2-metadata-conflict:${randomUUID()}`,
+      "5 seconds",
+    );
+    const conflict = await withTimeout(
+      conflictingPublishCaller.result(),
+      5_000,
+      "different metadata choice did not reject",
+    );
+    assert.match(conflict.error, /MediaUploadSelectionConflict/);
+    assert.equal(await Promise.race([
+      publishOutcomePromise.then(() => true),
+      delay(0).then(() => false),
+    ]), false, "metadata publication completed before its public write");
+
+    publicationGate.resolve();
+    const expectedResult = {
+      status: "completed",
+      id: source.id,
+      url: `${PUBLIC_BASE_URL}/${publicKey}`,
+      mediaType: "image/webp",
+      metadata,
+    };
+    assert.deepEqual(await withTimeout(publishCaller.result(), WORKFLOW_TIMEOUT_MS, "metadata publication did not finish"), {
+      result: expectedResult,
+    });
+    assert.deepEqual(await withTimeout(
+      duplicatePublishCaller.result(),
+      WORKFLOW_TIMEOUT_MS,
+      "same metadata choice did not reuse the applied receipt",
+    ), { result: expectedResult });
+    assert.deepEqual(await withTimeout(uploadCaller.result(), WORKFLOW_TIMEOUT_MS, "metadata upload did not finish"), {
+      upload: {
+        id: source.id,
+        url: `${PUBLIC_BASE_URL}/${publicKey}`,
+        mediaType: "image/webp",
+        metadata,
+      },
+      publishResults: [],
+    });
+    assert.deepEqual(workerFailures, []);
+  } finally {
+    publicationGate.resolve();
+    if (worker) await stopWorker(worker).catch(() => undefined);
+    await environment.deleteNexusEndpoint(endpoint).catch(() => undefined);
+    await environment.teardown();
+  }
+});
+
 test("Nexus publishUploadV2 returns processing for an immutable filtered selection", async () => {
   const workflowBundle = await bundleWorkflowCode({
     workflowsPath: resolve("scripts/temporal-test-workflow.ts"),
@@ -1836,6 +2194,10 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
     const input = uploadInput(source.id, source.sourceKey);
     const defaultKey = preparedKey(source.sourceKey);
     const publicKey = `original/${source.id}.webp`;
+    const metadata = {
+      credit: "Artist and public profile",
+      sourceUrl: "https://social.example/@artist/posts/123",
+    };
     staging.seed(source.sourceKey, PNG_1X1);
     const uploadCaller = await startCaller(
       environment,
@@ -1853,7 +2215,7 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
     const publishCaller = await startPublishUploadV2Caller(
       environment,
       endpointName,
-      { id: source.id, applyAiProhibitFilter: true },
+      { id: source.id, applyAiProhibitFilter: true, metadata },
       `publish-v2-hope:${randomUUID()}`,
       "5 seconds",
     );
@@ -1881,7 +2243,7 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
     const duplicatePublishCaller = await startPublishUploadV2Caller(
       environment,
       endpointName,
-      { id: source.id, applyAiProhibitFilter: true },
+      { id: source.id, applyAiProhibitFilter: true, metadata },
       `publish-v2-hope-duplicate:${randomUUID()}`,
       "5 seconds",
     );
@@ -1893,7 +2255,7 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
     const conflictingPublishCaller = await startPublishUploadV2Caller(
       environment,
       endpointName,
-      { id: source.id, applyAiProhibitFilter: false },
+      { id: source.id, applyAiProhibitFilter: false, metadata },
       `publish-v2-hope-conflict:${randomUUID()}`,
       "5 seconds",
     );
@@ -1924,9 +2286,29 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
       id: source.id,
       url: `${PUBLIC_BASE_URL}/${publicKey}`,
       mediaType: "image/webp",
+      metadata,
     });
-    assert.deepEqual(media.objects.get(publicKey).bytes, protectedWebp);
-    assert.notDeepEqual(media.objects.get(publicKey).bytes, defaultBytes);
+    const publicWebp = media.objects.get(publicKey).bytes;
+    const publicChunks = parseWebpChunks(publicWebp);
+    const publicXmpChunks = publicChunks.filter(({ fourCC }) => fourCC === "XMP ");
+    assert.equal(publicXmpChunks.length, 1);
+    const publicXmpChunk = publicXmpChunks[0];
+    const publicXmp = publicWebp.toString(
+      "utf8",
+      publicXmpChunk.start + 8,
+      publicXmpChunk.start + 8 + publicXmpChunk.size,
+    );
+    assert.match(publicXmp, /<photoshop:Credit>Artist and public profile<\/photoshop:Credit>/);
+    assert.match(publicXmp, /<rdf:li>https:\/\/social\.example\/@artist\/posts\/123<\/rdf:li>/);
+    assert.deepEqual(
+      publicChunks
+        .filter(({ fourCC }) => fourCC !== "VP8X" && fourCC !== "XMP ")
+        .map(({ start, end }) => publicWebp.subarray(start, end)),
+      parseWebpChunks(protectedWebp)
+        .filter(({ fourCC }) => fourCC !== "VP8X" && fourCC !== "XMP ")
+        .map(({ start, end }) => protectedWebp.subarray(start, end)),
+    );
+    assert.notDeepEqual(publicWebp, defaultBytes);
 
     staging.seed(failingSource.sourceKey, PNG_1X1);
     const failingPublicKey = `original/${failingSource.id}.webp`;

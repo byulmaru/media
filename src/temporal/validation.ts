@@ -38,11 +38,54 @@ const processUploadFields = {
   id: uploadIdSchema,
 };
 
+function isXml10Text(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (
+      codePoint !== 0x9 && codePoint !== 0xa && codePoint !== 0xd &&
+      !(codePoint >= 0x20 && codePoint <= 0xd7ff) &&
+      !(codePoint >= 0xe000 && codePoint <= 0xfffd) &&
+      !(codePoint >= 0x10000 && codePoint <= 0x10ffff)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function xmlText(maxLength: number) {
+  return z.string().max(maxLength).refine(isXml10Text);
+}
+
+function httpUrl(maxLength: number) {
+  return xmlText(maxLength).refine((value) => {
+    try {
+      const url = new URL(value);
+      return (url.protocol === "http:" || url.protocol === "https:") && url.hostname.length > 0;
+    } catch {
+      return false;
+    }
+  });
+}
+
+const publishUploadMetadataSchema = z.object({
+  credit: xmlText(4_000),
+  sourceUrl: httpUrl(2_000),
+  copyright: xmlText(2_000).optional(),
+  usageTerms: xmlText(8_000).optional(),
+  webStatement: httpUrl(2_000).optional(),
+}).refine(({ copyright, usageTerms, webStatement }) => {
+  const rightsFields = [copyright, usageTerms, webStatement];
+  return rightsFields.every((field) => field === undefined) ||
+    rightsFields.every((field) => field !== undefined);
+});
+
 export const processUploadInputSchema = z.object(processUploadFields);
 
 export const publishPreparedUploadInputSchema = z.object({
   ...processUploadFields,
   hopeRequestId: uuidSchema.optional(),
+  metadata: publishUploadMetadataSchema.optional(),
 });
 
 export const publishUploadInputSchema = z.strictObject({
@@ -52,6 +95,7 @@ export const publishUploadInputSchema = z.strictObject({
 export const publishUploadV2InputSchema = z.object({
   id: uploadIdSchema,
   applyAiProhibitFilter: z.boolean().default(false),
+  metadata: publishUploadMetadataSchema.optional(),
 });
 
 export const publishUploadV2WorkflowInputSchema = publishUploadV2InputSchema.extend({
@@ -127,6 +171,7 @@ const publishUploadV2RequestSignalSchema = z.object({
   requestId: uuidSchema,
   replyWorkflowId: z.string().min(1).max(PUBLISH_UPLOAD_V2_REPLY_WORKFLOW_ID_MAX_LENGTH),
   applyAiProhibitFilter: z.boolean(),
+  metadata: publishUploadMetadataSchema.optional(),
 });
 
 const publishUploadV2WorkflowReplySchema = z.union([
@@ -138,6 +183,7 @@ const publishUploadV2WorkflowReplySchema = z.union([
         id: uploadIdSchema,
         url: z.string().min(1),
         mediaType: z.literal("image/webp"),
+        metadata: publishUploadMetadataSchema.optional(),
       }),
       z.object({
         status: z.literal("processing"),

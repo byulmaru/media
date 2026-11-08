@@ -8,6 +8,8 @@ import {
   parseHopeProcessingInput,
   parseProcessUploadInput,
   parsePublishPreparedUploadInput,
+  parsePublishUploadV2Input,
+  parsePublishUploadV2WorkflowReply,
   parseUploadSourceCleanupInput,
 } from "../src/temporal/validation";
 
@@ -42,6 +44,65 @@ describe("Temporal upload input validation", () => {
       maxBytes: 1,
       maxDimension: 1,
     })).toEqual(input);
+  });
+});
+
+describe("publishUploadV2 metadata validation", () => {
+  const metadata = {
+    credit: "Artist & profile",
+    sourceUrl: "https://social.example/@artist/posts/123",
+  };
+
+  it("accepts a source URL with no rights fields and a complete rights trio", () => {
+    expect(parsePublishUploadV2Input({ id: uploadId, metadata })).toEqual({
+      id: uploadId,
+      applyAiProhibitFilter: false,
+      metadata,
+    });
+    const complete = {
+      ...metadata,
+      copyright: "Artist",
+      usageTerms: "Noncommercial use only",
+      webStatement: "https://social.example/terms/image-use/v1",
+    };
+    expect(parsePublishUploadV2Input({ id: uploadId, metadata: complete })?.metadata).toEqual(complete);
+    expect(parsePublishPreparedUploadInput({ id: uploadId, metadata: complete })).toEqual({
+      id: uploadId,
+      metadata: complete,
+    });
+  });
+
+  it.each([
+    ["partial rights trio", { ...metadata, copyright: "Artist" }],
+    ["non-HTTP source URL", { ...metadata, sourceUrl: "ftp://social.example/posts/123" }],
+    ["non-HTTP web statement", {
+      ...metadata,
+      copyright: "Artist",
+      usageTerms: "Noncommercial use only",
+      webStatement: "javascript:alert(1)",
+    }],
+    ["XML control character", { ...metadata, credit: "Artist\u0001" }],
+    ["overlong credit", { ...metadata, credit: "x".repeat(4_001) }],
+  ] as const)("rejects %s", (_label, invalidMetadata) => {
+    expect(parsePublishUploadV2Input({ id: uploadId, metadata: invalidMetadata })).toBeUndefined();
+  });
+
+  it("strips unknown metadata fields like the existing V2 DTO", () => {
+    expect(parsePublishUploadV2Input({
+      id: uploadId,
+      metadata: { ...metadata, author: "Artist" },
+    })?.metadata).toEqual(metadata);
+  });
+
+  it("accepts a non-retryable public metadata provenance conflict reply", () => {
+    const failure = {
+      requestId,
+      error: {
+        type: "MediaUploadMetadataConflict",
+        message: "Upload metadata does not match the existing public image",
+      },
+    };
+    expect(parsePublishUploadV2WorkflowReply(uploadId, requestId, failure)).toEqual(failure);
   });
 });
 

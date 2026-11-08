@@ -16,6 +16,7 @@ export const UPLOAD_SOURCE_ERROR_TYPE = "UploadSourceError";
 export const UPLOAD_EXPIRED_ERROR_TYPE = "UploadExpiredError";
 export const HOPE_PROCESSING_ERROR_TYPE = "HopeProcessingError";
 export const UPLOAD_PUBLICATION_SELECTION_CONFLICT_ERROR_TYPE = "MediaUploadSelectionConflict";
+export const UPLOAD_METADATA_CONFLICT_ERROR_TYPE = "MediaUploadMetadataConflict";
 export const APPLY_HOPE_REPLY_ERROR_TYPES = [
   HOPE_PROCESSING_ERROR_TYPE,
   UPLOAD_EXPIRED_ERROR_TYPE,
@@ -26,6 +27,7 @@ export const APPLY_HOPE_REPLY_ERROR_TYPES = [
 export const PUBLISH_UPLOAD_V2_REPLY_ERROR_TYPES = [
   ...APPLY_HOPE_REPLY_ERROR_TYPES,
   UPLOAD_PUBLICATION_SELECTION_CONFLICT_ERROR_TYPE,
+  UPLOAD_METADATA_CONFLICT_ERROR_TYPE,
 ] as const;
 export const UPLOAD_EXPIRATION_MS = 24 * 60 * 60 * 1000;
 export const HOPE_TASK_QUEUE = "media-hope";
@@ -48,6 +50,7 @@ export interface ProcessUploadResult {
   id: string;
   url: string;
   mediaType: "image/webp";
+  metadata?: PublishUploadMetadata;
 }
 
 export interface PublishUploadInput {
@@ -61,10 +64,18 @@ export interface PublishUploadResult {
 export interface PublishUploadV2Input {
   id: string;
   applyAiProhibitFilter?: boolean;
+  metadata?: PublishUploadMetadata;
 }
 
-export interface NormalizedPublishUploadV2Input {
-  id: string;
+export interface PublishUploadMetadata {
+  credit: string;
+  sourceUrl: string;
+  copyright?: string;
+  usageTerms?: string;
+  webStatement?: string;
+}
+
+export interface NormalizedPublishUploadV2Input extends PublishUploadV2Input {
   applyAiProhibitFilter: boolean;
 }
 
@@ -73,13 +84,20 @@ export interface PublishUploadV2WorkflowInput extends NormalizedPublishUploadV2I
 }
 
 export type PublishUploadV2Result =
-  | { status: "completed"; id: string; url: string; mediaType: "image/webp" }
+  | {
+      status: "completed";
+      id: string;
+      url: string;
+      mediaType: "image/webp";
+      metadata?: PublishUploadMetadata;
+    }
   | { status: "processing"; id: string };
 
 export interface PublishUploadV2RequestSignal {
   requestId: string;
   replyWorkflowId: string;
   applyAiProhibitFilter: boolean;
+  metadata?: PublishUploadMetadata;
 }
 
 export interface PublishUploadV2RequestEnvelope {
@@ -93,6 +111,7 @@ export type PublishUploadV2WorkflowReply =
 
 export interface PublishPreparedUploadInput extends ProcessUploadInput {
   hopeRequestId?: string;
+  metadata?: PublishUploadMetadata;
 }
 
 export interface UploadSourceCleanupInput {
