@@ -178,13 +178,14 @@ function metadataSha256(metadata: PublishUploadMetadata): string {
 }
 
 function xmlText(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => {
+  return value.replace(/[&<>"'\r]/g, (character) => {
     switch (character) {
       case "&": return "&amp;";
       case "<": return "&lt;";
       case ">": return "&gt;";
       case "\"": return "&quot;";
       case "'": return "&apos;";
+      case "\r": return "&#xD;";
       default: return character;
     }
   });

@@ -59,6 +59,7 @@ function xmlText(maxLength: number) {
 
 function httpUrl(maxLength: number) {
   return xmlText(maxLength).refine((value) => {
+    if (/[\u0000-\u0020\u007f]/.test(value)) return false;
     try {
       const url = new URL(value);
       return (url.protocol === "http:" || url.protocol === "https:") && url.hostname.length > 0;

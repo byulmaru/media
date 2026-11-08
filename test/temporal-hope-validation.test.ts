@@ -75,6 +75,7 @@ describe("publishUploadV2 metadata validation", () => {
   it.each([
     ["partial rights trio", { ...metadata, copyright: "Artist" }],
     ["non-HTTP source URL", { ...metadata, sourceUrl: "ftp://social.example/posts/123" }],
+    ["raw newline in source URL", { ...metadata, sourceUrl: "https://social.example/posts/123\n?view=full" }],
     ["non-HTTP web statement", {
       ...metadata,
       copyright: "Artist",

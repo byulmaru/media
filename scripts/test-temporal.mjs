@@ -739,7 +739,7 @@ test("metadata publication muxes XMP without changing image chunks and confirms 
   const outputKey = `original/${source.id}.webp`;
   const preparedWebp = await sharp(PNG_RGBA_2X1).webp().toBuffer();
   const metadata = {
-    credit: "Jiyu & <publisher>",
+    credit: "Jiyu & <publisher>\rcontact",
     sourceUrl: "https://media.example/posts/one?view=full&lang=ko",
     copyright: "© Jiyu <all rights>",
     usageTerms: "Use & share only with permission",
@@ -780,7 +780,7 @@ test("metadata publication muxes XMP without changing image chunks and confirms 
 
   const xmpChunk = publishedChunks.find(({ fourCC }) => fourCC === "XMP ");
   const xmp = published.bytes.toString("utf8", xmpChunk.start + 8, xmpChunk.start + 8 + xmpChunk.size);
-  assert.match(xmp, /<photoshop:Credit>Jiyu &amp; &lt;publisher&gt;<\/photoshop:Credit>/);
+  assert.match(xmp, /<photoshop:Credit>Jiyu &amp; &lt;publisher&gt;&#xD;contact<\/photoshop:Credit>/);
   assert.match(xmp, /<dc:relation><rdf:Bag><rdf:li>https:\/\/media\.example\/posts\/one\?view=full&amp;lang=ko<\/rdf:li><\/rdf:Bag><\/dc:relation>/);
   assert.match(xmp, /<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">© Jiyu &lt;all rights&gt;<\/rdf:li><\/rdf:Alt><\/dc:rights>/);
   assert.match(xmp, /<xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">Use &amp; share only with permission<\/rdf:li><\/rdf:Alt><\/xmpRights:UsageTerms>/);
