@@ -158,7 +158,6 @@ function samePublishUploadMetadata(
   right: PublishUploadMetadata | undefined,
 ): boolean {
   return left?.credit === right?.credit &&
-    left?.sourceUrl === right?.sourceUrl &&
     left?.copyright === right?.copyright &&
     left?.usageTerms === right?.usageTerms &&
     left?.webStatement === right?.webStatement;

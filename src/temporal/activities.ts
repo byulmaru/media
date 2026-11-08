@@ -167,7 +167,6 @@ function metadataPublicationConflict(): ApplicationFailure {
 function metadataSha256(metadata: PublishUploadMetadata): string {
   const values = [
     ["credit", "text", metadata.credit],
-    ["sourceUrl", "url", metadata.sourceUrl],
     ["copyright", metadata.copyright === undefined ? ["absent"] : ["text", metadata.copyright]],
     ["usageTerms", metadata.usageTerms === undefined ? ["absent"] : ["text", metadata.usageTerms]],
     ["webStatement", metadata.webStatement === undefined ? ["absent"] : ["url", metadata.webStatement]],
@@ -205,7 +204,6 @@ function xmpPacket(metadata: PublishUploadMetadata): Buffer {
     '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">',
     '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/" xmlns:plus="http://ns.useplus.org/ldf/xmp/1.0/">',
     `<photoshop:Credit>${xmlText(metadata.credit)}</photoshop:Credit>`,
-    `<dc:relation><rdf:Bag><rdf:li>${xmlText(metadata.sourceUrl)}</rdf:li></rdf:Bag></dc:relation>`,
     ...rights,
     `<plus:DataMining>${plusDataMining}</plus:DataMining>`,
     '</rdf:Description>',

@@ -739,8 +739,7 @@ test("metadata publication muxes XMP without changing image chunks and confirms 
   const outputKey = `original/${source.id}.webp`;
   const preparedWebp = await sharp(PNG_RGBA_2X1).webp().toBuffer();
   const metadata = {
-    credit: "Jiyu & <publisher>\rcontact",
-    sourceUrl: "https://media.example/posts/one?view=full&lang=ko",
+    credit: "Jiyu & <publisher> https://media.example/@jiyu\rcontact",
     copyright: "© Jiyu <all rights>",
     usageTerms: "Use & share only with permission",
     webStatement: "https://media.example/terms?media=image&rights=1",
@@ -780,8 +779,8 @@ test("metadata publication muxes XMP without changing image chunks and confirms 
 
   const xmpChunk = publishedChunks.find(({ fourCC }) => fourCC === "XMP ");
   const xmp = published.bytes.toString("utf8", xmpChunk.start + 8, xmpChunk.start + 8 + xmpChunk.size);
-  assert.match(xmp, /<photoshop:Credit>Jiyu &amp; &lt;publisher&gt;&#xD;contact<\/photoshop:Credit>/);
-  assert.match(xmp, /<dc:relation><rdf:Bag><rdf:li>https:\/\/media\.example\/posts\/one\?view=full&amp;lang=ko<\/rdf:li><\/rdf:Bag><\/dc:relation>/);
+  assert.match(xmp, /<photoshop:Credit>Jiyu &amp; &lt;publisher&gt; https:\/\/media\.example\/@jiyu&#xD;contact<\/photoshop:Credit>/);
+  assert.doesNotMatch(xmp, /<dc:relation>/);
   assert.match(xmp, /<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">© Jiyu &lt;all rights&gt;<\/rdf:li><\/rdf:Alt><\/dc:rights>/);
   assert.match(xmp, /<xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">Use &amp; share only with permission<\/rdf:li><\/rdf:Alt><\/xmpRights:UsageTerms>/);
   assert.match(xmp, /<xmpRights:WebStatement rdf:resource="https:\/\/media\.example\/terms\?media=image&amp;rights=1"\/>/);
@@ -870,8 +869,7 @@ test("metadata publication muxes XMP without changing image chunks and confirms 
   const simpleWebp = webpWithoutVp8x(await sharp(PNG_1X1).webp().toBuffer());
   assert.equal(parseWebpChunks(simpleWebp).some(({ fourCC }) => fourCC === "VP8X"), false);
   const simpleMetadata = {
-    credit: "Artist",
-    sourceUrl: "https://media.example/posts/simple",
+    credit: "Artist https://media.example/@artist",
   };
   staging.seed(simplePreparedKey, simpleWebp, new Date(), "image/webp");
   const simpleResult = await activities.publishPreparedUpload({ id: simple.id, metadata: simpleMetadata });
@@ -902,14 +900,14 @@ test("metadata publication muxes XMP without changing image chunks and confirms 
       simpleChunks.find(({ fourCC }) => fourCC === "XMP ").size,
   );
   assert.doesNotMatch(simpleXmp, /dc:rights|xmpRights:UsageTerms|xmpRights:WebStatement/);
+  assert.match(simpleXmp, /<plus:DataMining>http:\/\/ns\.useplus\.org\/ldf\/vocab\/DMI-PROHIBITED-AIMLTRAINING<\/plus:DataMining>/);
 
   const large = newUpload();
   const largePreparedKey = preparedKey(large.sourceKey);
   const largePublicKey = `original/${large.id}.webp`;
   const largeWebp = webpWithJunkChunk(simpleWebp, DEFAULT_MAX_BYTES + 1);
   const largeMetadata = {
-    credit: "Artist",
-    sourceUrl: "https://media.example/posts/large",
+    credit: "Artist https://media.example/@artist",
   };
   staging.seed(largePreparedKey, largeWebp, new Date(), "image/webp");
   const largeResult = await activities.publishPreparedUpload({ id: large.id, metadata: largeMetadata });
@@ -2033,8 +2031,7 @@ test("Nexus publishUploadV2 fixes metadata selection and returns the applied rec
     const source = newUpload();
     const publicKey = `original/${source.id}.webp`;
     const metadata = {
-      credit: "Artist and public profile",
-      sourceUrl: "https://social.example/@artist/posts/123",
+      credit: "Artist and public profile https://social.example/@artist",
     };
     staging.seed(source.sourceKey, PNG_1X1);
     const uploadCaller = await startCaller(
@@ -2075,7 +2072,7 @@ test("Nexus publishUploadV2 fixes metadata selection and returns the applied rec
       endpointName,
       {
         id: source.id,
-        metadata: { ...metadata, credit: "Different artist" },
+        metadata: { ...metadata, credit: "Different artist https://social.example/@different" },
       },
       `publish-v2-metadata-conflict:${randomUUID()}`,
       "5 seconds",
@@ -2195,8 +2192,7 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
     const defaultKey = preparedKey(source.sourceKey);
     const publicKey = `original/${source.id}.webp`;
     const metadata = {
-      credit: "Artist and public profile",
-      sourceUrl: "https://social.example/@artist/posts/123",
+      credit: "Artist and public profile https://social.example/@artist",
     };
     staging.seed(source.sourceKey, PNG_1X1);
     const uploadCaller = await startCaller(
@@ -2298,8 +2294,8 @@ test("Nexus publishUploadV2 returns processing for an immutable filtered selecti
       publicXmpChunk.start + 8,
       publicXmpChunk.start + 8 + publicXmpChunk.size,
     );
-    assert.match(publicXmp, /<photoshop:Credit>Artist and public profile<\/photoshop:Credit>/);
-    assert.match(publicXmp, /<rdf:li>https:\/\/social\.example\/@artist\/posts\/123<\/rdf:li>/);
+    assert.match(publicXmp, /<photoshop:Credit>Artist and public profile https:\/\/social\.example\/@artist<\/photoshop:Credit>/);
+    assert.doesNotMatch(publicXmp, /<dc:relation>/);
     assert.deepEqual(
       publicChunks
         .filter(({ fourCC }) => fourCC !== "VP8X" && fourCC !== "XMP ")

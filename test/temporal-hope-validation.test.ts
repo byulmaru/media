@@ -49,11 +49,10 @@ describe("Temporal upload input validation", () => {
 
 describe("publishUploadV2 metadata validation", () => {
   const metadata = {
-    credit: "Artist & profile",
-    sourceUrl: "https://social.example/@artist/posts/123",
+    credit: "Artist & profile https://social.example/@artist",
   };
 
-  it("accepts a source URL with no rights fields and a complete rights trio", () => {
+  it("accepts credit with no rights fields and a complete rights trio", () => {
     expect(parsePublishUploadV2Input({ id: uploadId, metadata })).toEqual({
       id: uploadId,
       applyAiProhibitFilter: false,
@@ -74,13 +73,17 @@ describe("publishUploadV2 metadata validation", () => {
 
   it.each([
     ["partial rights trio", { ...metadata, copyright: "Artist" }],
-    ["non-HTTP source URL", { ...metadata, sourceUrl: "ftp://social.example/posts/123" }],
-    ["raw newline in source URL", { ...metadata, sourceUrl: "https://social.example/posts/123\n?view=full" }],
     ["non-HTTP web statement", {
       ...metadata,
       copyright: "Artist",
       usageTerms: "Noncommercial use only",
       webStatement: "javascript:alert(1)",
+    }],
+    ["raw newline in web statement", {
+      ...metadata,
+      copyright: "Artist",
+      usageTerms: "Noncommercial use only",
+      webStatement: "https://social.example/terms\n?view=full",
     }],
     ["XML control character", { ...metadata, credit: "Artist\u0001" }],
     ["overlong credit", { ...metadata, credit: "x".repeat(4_001) }],

@@ -71,7 +71,6 @@ function httpUrl(maxLength: number) {
 
 const publishUploadMetadataSchema = z.object({
   credit: xmlText(4_000),
-  sourceUrl: httpUrl(2_000),
   copyright: xmlText(2_000).optional(),
   usageTerms: xmlText(8_000).optional(),
   webStatement: httpUrl(2_000).optional(),

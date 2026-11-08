@@ -69,7 +69,6 @@ export interface PublishUploadV2Input {
 
 export interface PublishUploadMetadata {
   credit: string;
-  sourceUrl: string;
   copyright?: string;
   usageTerms?: string;
   webStatement?: string;
