@@ -30,6 +30,7 @@ import type {
   PublishUploadV2WorkflowReply,
   HopeProcessingActivities,
   NormalizedHopeOptions,
+  PublishUploadMetadata,
 } from "./types";
 import {
   HOPE_MAX_EDGE,
@@ -47,6 +48,7 @@ import {
   UPLOAD_SOURCE_ERROR_TYPE,
   UPLOAD_VALIDATION_ERROR_TYPE,
   UPLOAD_PUBLICATION_SELECTION_CONFLICT_ERROR_TYPE,
+  UPLOAD_METADATA_CONFLICT_ERROR_TYPE,
 } from "./types";
 import {
   parseProcessUploadInput,
@@ -151,6 +153,16 @@ function publicationSelectionConflictError(): ApplicationFailure {
   });
 }
 
+function samePublishUploadMetadata(
+  left: PublishUploadMetadata | undefined,
+  right: PublishUploadMetadata | undefined,
+): boolean {
+  return left?.credit === right?.credit &&
+    left?.copyright === right?.copyright &&
+    left?.usageTerms === right?.usageTerms &&
+    left?.webStatement === right?.webStatement;
+}
+
 function safeApplyHopeFailure(error: unknown): ApplyHopeWorkflowFailure {
   let cause = error;
   while (cause instanceof Error && !(cause instanceof ApplicationFailure)) {
@@ -201,6 +213,12 @@ function safePublishUploadV2Failure(error: unknown): PublishUploadV2WorkflowFail
     return {
       type: UPLOAD_PUBLICATION_SELECTION_CONFLICT_ERROR_TYPE,
       message: "Upload publication choice conflicts with the accepted choice",
+    };
+  }
+  if (cause instanceof ApplicationFailure && cause.type === UPLOAD_METADATA_CONFLICT_ERROR_TYPE) {
+    return {
+      type: UPLOAD_METADATA_CONFLICT_ERROR_TYPE,
+      message: "Upload metadata does not match the existing public image",
     };
   }
   return safeApplyHopeFailure(error);
@@ -364,6 +382,7 @@ async function publishUploadV2Workflow(
       requestId,
       replyWorkflowId,
       applyAiProhibitFilter: normalized.applyAiProhibitFilter,
+      ...(normalized.metadata ? { metadata: normalized.metadata } : {}),
     } satisfies PublishUploadV2RequestSignal,
   );
 
@@ -402,6 +421,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
   let pendingPublishV2Choice: boolean | undefined;
   let pendingPublishV2Requests: PublishUploadV2RequestSignal[] = [];
   let selectedPublishV2Choice: boolean | undefined;
+  let selectedPublishV2Metadata: PublishUploadMetadata | undefined;
   let pendingPublishV2Results: PublishUploadV2RequestSignal[] = [];
   let completedPublishV2Result: Extract<PublishUploadV2Result, { status: "completed" }> | undefined;
   let publishV2Failure: PublishUploadV2WorkflowFailure | undefined;
@@ -441,7 +461,8 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
       if (completedPublishV2Result) {
         if (
           (selectedPublishV2Choice === undefined && selectedHopeRequestId !== undefined) ||
-          command.applyAiProhibitFilter !== (selectedPublishV2Choice ?? false)
+          command.applyAiProhibitFilter !== (selectedPublishV2Choice ?? false) ||
+          !samePublishUploadMetadata(command.metadata, selectedPublishV2Metadata)
         ) {
           await reject(publicationSelectionConflictError());
         } else {
@@ -453,7 +474,10 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
         return;
       }
       if (selectedPublishV2Choice !== undefined) {
-        if (selectedPublishV2Choice !== command.applyAiProhibitFilter) {
+        if (
+          selectedPublishV2Choice !== command.applyAiProhibitFilter ||
+          !samePublishUploadMetadata(command.metadata, selectedPublishV2Metadata)
+        ) {
           await reject(publicationSelectionConflictError());
         } else if (publishV2Failure) {
           await sendPublishUploadV2Reply(validatedInput.id, command.replyWorkflowId, {
@@ -494,7 +518,10 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
         return;
       }
       if (pendingPublishV2Choice !== undefined) {
-        if (pendingPublishV2Choice !== command.applyAiProhibitFilter) {
+        if (
+          pendingPublishV2Choice !== command.applyAiProhibitFilter ||
+          !samePublishUploadMetadata(command.metadata, pendingPublishV2Requests[0]?.metadata)
+        ) {
           await reject(publicationSelectionConflictError());
         } else {
           pendingPublishV2Requests.push(command);
@@ -653,6 +680,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
           pendingPublishV2Choice = undefined;
           pendingPublishV2Requests = [];
           selectedPublishV2Choice = choice;
+          selectedPublishV2Metadata = requests[0]?.metadata;
           published = true;
           if (choice) {
             const requestId = uuid4();
@@ -706,6 +734,7 @@ export async function processUploadWorkflow(input: ProcessUploadInput): Promise<
       const result = await publishPreparedUpload({
         ...validatedInput,
         ...(selectedHopeRequestId ? { hopeRequestId: selectedHopeRequestId } : {}),
+        ...(selectedPublishV2Metadata ? { metadata: selectedPublishV2Metadata } : {}),
       });
       completedPublishV2Result = { status: "completed", ...result };
       await sendPublishUploadV2Replies(

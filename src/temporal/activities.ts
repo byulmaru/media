@@ -1,4 +1,5 @@
 import { ApplicationFailure, Context } from "@temporalio/activity";
+import { createHash } from "node:crypto";
 import { request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
 import sharp from "sharp";
@@ -25,6 +26,7 @@ import type {
   ProcessUploadInput,
   ProcessUploadResult,
   PublishPreparedUploadInput,
+  PublishUploadMetadata,
   UploadSourceCleanupInput,
 } from "./types";
 import {
@@ -36,6 +38,7 @@ import {
   UPLOAD_SOURCE_ERROR_TYPE,
   UPLOAD_VALIDATION_CODES,
   UPLOAD_VALIDATION_ERROR_TYPE,
+  UPLOAD_METADATA_CONFLICT_ERROR_TYPE,
 } from "./types";
 import {
   createHopeObservability,
@@ -51,6 +54,8 @@ import {
 
 const validationCodes: ReadonlySet<string> = new Set(UPLOAD_VALIDATION_CODES);
 const maxHopeResponseBytes = DEFAULT_MAX_BYTES;
+const publicationMetadataMarker = "publication-metadata-sha256";
+const plusDataMining = "http://ns.useplus.org/ldf/vocab/DMI-PROHIBITED-AIMLTRAINING";
 const hopeResponseHeaders = [
   "content-length",
   "content-type",
@@ -149,6 +154,207 @@ function hopeProcessingFailure(nonRetryable: boolean): ApplicationFailure {
     type: HOPE_PROCESSING_ERROR_TYPE,
     nonRetryable,
   });
+}
+
+function metadataPublicationConflict(): ApplicationFailure {
+  return ApplicationFailure.create({
+    message: "Upload metadata does not match the existing public image",
+    type: UPLOAD_METADATA_CONFLICT_ERROR_TYPE,
+    nonRetryable: true,
+  });
+}
+
+function metadataSha256(metadata: PublishUploadMetadata): string {
+  const values = [
+    ["credit", "text", metadata.credit],
+    ["copyright", metadata.copyright === undefined ? ["absent"] : ["text", metadata.copyright]],
+    ["usageTerms", metadata.usageTerms === undefined ? ["absent"] : ["text", metadata.usageTerms]],
+    ["webStatement", metadata.webStatement === undefined ? ["absent"] : ["url", metadata.webStatement]],
+  ];
+  return createHash("sha256")
+    .update(JSON.stringify(["media-publication-metadata-v1", values]))
+    .digest("hex");
+}
+
+function xmlText(value: string): string {
+  return value.replace(/[&<>"'\r]/g, (character) => {
+    switch (character) {
+      case "&": return "&amp;";
+      case "<": return "&lt;";
+      case ">": return "&gt;";
+      case "\"": return "&quot;";
+      case "'": return "&apos;";
+      case "\r": return "&#xD;";
+      default: return character;
+    }
+  });
+}
+
+function xmpPacket(metadata: PublishUploadMetadata): Buffer {
+  const rights = metadata.copyright === undefined
+    ? []
+    : [
+        `<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">${xmlText(metadata.copyright)}</rdf:li></rdf:Alt></dc:rights>`,
+        `<xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">${xmlText(metadata.usageTerms!)}</rdf:li></rdf:Alt></xmpRights:UsageTerms>`,
+        `<xmpRights:WebStatement rdf:resource="${xmlText(metadata.webStatement!)}"/>`,
+      ];
+  return Buffer.from([
+    '<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>',
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/">',
+    '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">',
+    '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/" xmlns:plus="http://ns.useplus.org/ldf/xmp/1.0/">',
+    `<photoshop:Credit>${xmlText(metadata.credit)}</photoshop:Credit>`,
+    ...rights,
+    `<plus:DataMining>${plusDataMining}</plus:DataMining>`,
+    '</rdf:Description>',
+    '</rdf:RDF>',
+    '</x:xmpmeta>',
+    '<?xpacket end="w"?>',
+  ].join("\n"), "utf8");
+}
+
+interface WebPChunk {
+  fourCC: string;
+  start: number;
+  end: number;
+  size: number;
+}
+
+function parseWebPChunks(bytes: Buffer): WebPChunk[] {
+  if (
+    bytes.byteLength < 20 ||
+    bytes.toString("ascii", 0, 4) !== "RIFF" ||
+    bytes.toString("ascii", 8, 12) !== "WEBP" ||
+    bytes.readUInt32LE(4) !== bytes.byteLength - 8
+  ) {
+    throw invalidProcessingInput();
+  }
+
+  const chunks: WebPChunk[] = [];
+  for (let offset = 12; offset < bytes.byteLength;) {
+    if (offset + 8 > bytes.byteLength) throw invalidProcessingInput();
+    const size = bytes.readUInt32LE(offset + 4);
+    const end = offset + 8 + size + (size & 1);
+    if (end > bytes.byteLength || (size & 1) !== 0 && bytes[end - 1] !== 0) {
+      throw invalidProcessingInput();
+    }
+    chunks.push({ fourCC: bytes.toString("ascii", offset, offset + 4), start: offset, end, size });
+    offset = end;
+  }
+  if (chunks.length === 0) throw invalidProcessingInput();
+  return chunks;
+}
+
+function simpleWebPDimensions(bytes: Buffer, chunks: WebPChunk[]): {
+  width: number;
+  height: number;
+  alpha: boolean;
+} {
+  const imageChunks = chunks.filter(({ fourCC }) => fourCC === "VP8 " || fourCC === "VP8L");
+  if (imageChunks.length !== 1) throw invalidProcessingInput();
+  const chunk = imageChunks[0];
+  if (!chunk) throw invalidProcessingInput();
+  const offset = chunk.start + 8;
+  let width: number;
+  let height: number;
+  let alpha = chunks.some(({ fourCC }) => fourCC === "ALPH");
+
+  if (chunk.fourCC === "VP8 ") {
+    if (
+      chunk.size < 10 ||
+      (bytes[offset]! & 1) !== 0 ||
+      bytes[offset + 3] !== 0x9d || bytes[offset + 4] !== 0x01 || bytes[offset + 5] !== 0x2a
+    ) {
+      throw invalidProcessingInput();
+    }
+    width = bytes.readUInt16LE(offset + 6) & 0x3fff;
+    height = bytes.readUInt16LE(offset + 8) & 0x3fff;
+  } else {
+    if (chunk.size < 5 || bytes[offset] !== 0x2f) throw invalidProcessingInput();
+    const widthMinusOne = bytes[offset + 1]! | ((bytes[offset + 2]! & 0x3f) << 8);
+    const heightMinusOne = (bytes[offset + 2]! >> 6) | (bytes[offset + 3]! << 2) |
+      ((bytes[offset + 4]! & 0x0f) << 10);
+    width = widthMinusOne + 1;
+    height = heightMinusOne + 1;
+    alpha ||= (bytes[offset + 4]! & 0x10) !== 0;
+  }
+
+  if (width <= 0 || height <= 0 || width > 0x1000000 || height > 0x1000000) {
+    throw invalidProcessingInput();
+  }
+  return { width, height, alpha };
+}
+
+function makeWebPChunk(fourCC: string, payload: Buffer): Buffer {
+  const chunk = Buffer.alloc(8 + payload.byteLength + (payload.byteLength & 1));
+  chunk.write(fourCC, 0, "ascii");
+  chunk.writeUInt32LE(payload.byteLength, 4);
+  payload.copy(chunk, 8);
+  return chunk;
+}
+
+function makeVp8xPayload(chunks: WebPChunk[], dimensions: {
+  width: number;
+  height: number;
+  alpha: boolean;
+}): Buffer {
+  const payload = Buffer.alloc(10);
+  let flags = 0x04;
+  if (chunks.some(({ fourCC }) => fourCC === "ICCP")) flags |= 0x20;
+  if (dimensions.alpha) flags |= 0x10;
+  if (chunks.some(({ fourCC }) => fourCC === "EXIF")) flags |= 0x08;
+  if (chunks.some(({ fourCC }) => fourCC === "ANIM" || fourCC === "ANMF")) flags |= 0x02;
+  payload[0] = flags;
+  const widthMinusOne = dimensions.width - 1;
+  const heightMinusOne = dimensions.height - 1;
+  payload[4] = widthMinusOne & 0xff;
+  payload[5] = (widthMinusOne >> 8) & 0xff;
+  payload[6] = (widthMinusOne >> 16) & 0xff;
+  payload[7] = heightMinusOne & 0xff;
+  payload[8] = (heightMinusOne >> 8) & 0xff;
+  payload[9] = (heightMinusOne >> 16) & 0xff;
+  return payload;
+}
+
+function webPWithXmp(bytes: Buffer, metadata: PublishUploadMetadata): {
+  chunks: Buffer[];
+  contentLength: number;
+} {
+  const chunks = parseWebPChunks(bytes);
+  const vp8xChunks = chunks.filter(({ fourCC }) => fourCC === "VP8X");
+  const xmpChunks = chunks.filter(({ fourCC }) => fourCC === "XMP ");
+  if (vp8xChunks.length > 1 || xmpChunks.length > 1) throw invalidProcessingInput();
+
+  let vp8x: Buffer | undefined;
+  if (vp8xChunks.length === 1) {
+    const chunk = vp8xChunks[0];
+    if (!chunk) throw invalidProcessingInput();
+    if (chunk !== chunks[0] || chunk.size !== 10) throw invalidProcessingInput();
+    vp8x = Buffer.from(bytes.subarray(chunk.start, chunk.end));
+    vp8x[8] = vp8x[8]! | 0x04;
+  } else {
+    const dimensions = simpleWebPDimensions(bytes, chunks);
+    vp8x = makeWebPChunk("VP8X", makeVp8xPayload(chunks, dimensions));
+  }
+  if (!vp8x) throw invalidProcessingInput();
+
+  const xmp = makeWebPChunk("XMP ", xmpPacket(metadata));
+  const riffHeader = Buffer.from(bytes.subarray(0, 12));
+  const output: Buffer[] = [riffHeader];
+  if (vp8xChunks.length === 0) output.push(vp8x);
+  for (const chunk of chunks) {
+    if (chunk.fourCC === "VP8X") output.push(vp8x);
+    else if (chunk.fourCC === "XMP ") output.push(xmp);
+    else output.push(bytes.subarray(chunk.start, chunk.end));
+  }
+  if (xmpChunks.length === 0) output.push(xmp);
+
+  const contentLength = output.reduce((sum, part) => sum + part.byteLength, 0);
+  if (!Number.isSafeInteger(contentLength) || contentLength - 8 > 0xffffffff) {
+    throw invalidProcessingInput();
+  }
+  riffHeader.writeUInt32LE(contentLength - 8, 4);
+  return { chunks: output, contentLength };
 }
 
 function hopeTelemetryFailure(error: unknown, aborted: boolean): HopeFailure {
@@ -452,7 +658,63 @@ export function createUploadProcessingActivities(
       url: `${publicBaseUrl}/${outputKey}`,
       mediaType: "image/webp",
     };
-    if (await media.head(outputKey)) return result;
+    const existing = await media.head(outputKey);
+    if (existing) {
+      if (input.metadata) {
+        if (existing.customMetadata?.[publicationMetadataMarker] !== metadataSha256(input.metadata)) {
+          throw metadataPublicationConflict();
+        }
+        return { ...result, metadata: input.metadata };
+      }
+      return result;
+    }
+
+    if (input.metadata) {
+      const metadataHash = metadataSha256(input.metadata);
+      const prepared = await staging.getStream(stagingKey, "image/webp");
+      if (!prepared) throw new Error("prepared upload object is missing");
+      let preparedBytes: Buffer;
+      try {
+        preparedBytes = Buffer.allocUnsafe(prepared.contentLength);
+        let offset = 0;
+        for await (const chunk of prepared.body) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (offset + bytes.byteLength > prepared.contentLength) throw invalidProcessingInput();
+          bytes.copy(preparedBytes, offset);
+          offset += bytes.byteLength;
+        }
+        if (offset !== prepared.contentLength) throw invalidProcessingInput();
+      } finally {
+        prepared.body.destroy();
+      }
+
+      const muxed = webPWithXmp(preparedBytes, input.metadata);
+      const output = Readable.from(muxed.chunks);
+      try {
+        const stored = await media.putStream(
+          outputKey,
+          output,
+          muxed.contentLength,
+          {
+            onlyIf: new Headers({ "If-None-Match": "*" }),
+            httpMetadata: {
+              contentType: "image/webp",
+              cacheControl: IMMUTABLE_CACHE_CONTROL,
+            },
+            customMetadata: { [publicationMetadataMarker]: metadataHash },
+          },
+        );
+        if (!stored) {
+          const winner = await media.head(outputKey);
+          if (winner?.customMetadata?.[publicationMetadataMarker] !== metadataHash) {
+            throw metadataPublicationConflict();
+          }
+        }
+        return { ...result, metadata: input.metadata };
+      } finally {
+        output.destroy();
+      }
+    }
 
     const prepared = await staging.getStream(stagingKey, "image/webp");
     if (!prepared) throw new Error("prepared upload object is missing");
