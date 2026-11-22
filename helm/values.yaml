@@ -1,5 +1,12 @@
 replicaCount: 1
 
+api:
+  enabled: true
+
+secrets:
+  vaultKubernetesRole: vso-kubernetes-sync
+  vaultKubernetesAudiences: []
+
 version: "f0996c7dbe7e1f504930e76fd9aedb4a4a53f4ee"
 imageDigest: "sha256:f3d12ff3f59456557723ce94be3aec294699d1d4f4642c16a4730fe71265f5d8"
 
@@ -16,6 +23,7 @@ temporal:
   address: temporal-frontend.temporal.svc.cluster.local:7233
   namespace: media
   taskQueue: media-upload
+  nexusEndpoint: ""
   adminToolsImage: temporalio/admin-tools@sha256:dbc5fcd6ee8f0f4d808bf765af9a87dea9d8a283abfdcfbd2fc148496ba66107
 
 hope:
