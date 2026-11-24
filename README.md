@@ -118,17 +118,18 @@ Staging bucket에는 public read, custom domain, `r2.dev` URL을 설정하지 �
 
 Cloudflare Worker 코드와 secret은 Wrangler가 담당합니다. API hostname과 HTTPRoute는 Helm chart에서 Kubernetes ingress로 설정합니다. Node.js 서버의 환경 변수는 실행 환경에서 주입합니다. `AWS_ACCESS_KEY_ID`와 `AWS_SECRET_ACCESS_KEY`는 `byulmaru-media`와 `byulmaru-media-staging` bucket의 object read/write만 허용하고, 서버의 secret store에 보관하며 이미지로 복사하지 않습니다. API와 Media Worker는 같은 credentials를 사용하므로 API pod에도 private staging bucket의 read/write 권한이 있습니다.
 
-Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 실행합니다. Pull request에서는 plan만 만들고, `main` push와 수동 실행에서는 새 saved plan을 생성해 그대로 적용합니다. State는 `byulmaru-terraform-state` S3 bucket의 `media/terraform.tfstate` key를 사용합니다.
+Terraform plan/apply는 [GitHub Actions](./.github/workflows/terraform.yml)가 실행합니다. Pull request에서는 plan만 만들고, `main` push와 수동 실행에서는 새 saved plan을 생성해 그대로 적용합니다. State는 OCI 춘천의 조직 공용 비공개 버킷 `byulmaru-terraform-state`에 `media/terraform.tfstate`로 저장합니다.
 
 Repository variables:
 
-- `AWS_ROLE_ARN`: state bucket에 접근할 GitHub Actions OIDC role
+- `OCI_IDENTITY_DOMAIN_URL`, `OCI_OIDC_CLIENT_ID`, `TF_STATE_NAMESPACE`: state에 접근하는 OCI OIDC 설정
 - `CLOUDFLARE_ACCOUNT_ID`: media 리소스를 소유할 Cloudflare account ID
 - `CLOUDFLARE_ZONE_ID`: `byulma.run` Cloudflare zone ID
 - `TAILSCALE_OAUTH_CLIENT_ID`, `TAILSCALE_AUDIENCE`: GitHub Actions가 private Argo CD에 접근할 Tailscale workload identity 값. Media repository의 GitHub OIDC identity도 Tailscale 외부 workload identity 정책에서 허용해야 합니다.
 
 Repository secrets:
 
+- `OCI_OIDC_CLIENT_SECRET`: OCI 토큰 교환에 사용하는 OAuth client secret
 - `CLOUDFLARE_API_TOKEN`: R2 bucket, custom domain과 CORS를 관리할 Terraform token
 
 Cloudflare API token에는 `Workers R2 Storage Read`와 `Workers R2 Storage Write` 권한이 필요합니다.
@@ -342,7 +343,7 @@ pnpm infra:validate
 
 ## Kubernetes 배포 (Argo CD)
 
-1. 위 Tailscale 변수와 외부 workload identity 정책을 준비한 뒤 Kubernetes repository의 Terraform 변경을 적용해 Media GitHub OIDC identity에 Argo CD `media` project 접근 권한을 줍니다. 이어서 이 repository의 Terraform을 적용해 `helm/` chart를 `media` namespace에 배포하는 `media` Application을 만듭니다. 처음에는 자동 동기화가 꺼져 있습니다.
+1. `byulmaru/infrastructure`가 OKE Argo CD의 `media` Application과 Media GitHub OIDC 권한을 관리합니다. 이 저장소의 Terraform은 Cloudflare 스토리지를 관리합니다.
 2. Worker 배포 전에 Kubernetes repository의 PR 145 NetworkPolicy 변경을 적용합니다. 이 network rule은 `media` namespace에서 Temporal frontend의 TCP 7233으로 연결할 수 있게 합니다. 이는 frontend network reachability만 허용하며 Temporal namespace authorization을 설정하지 않습니다. 다른 namespace나 port 허용은 추가하지 않습니다.
 3. Chart의 PreSync Job은 `media` Temporal namespace를 30일 retention으로 생성하거나 조정합니다. Temporal CLI는 cluster server와 같은 `1.31.2` admin-tools image를 사용하고 TLS와 config file/env 설정을 끕니다. NetworkPolicy를 먼저 적용해야 합니다.
 4. PR 13 storage 변경을 적용해 private `byulmaru-media-staging` bucket과 `uploads/` prefix의 48시간 lifecycle backstop, 미완료 multipart upload의 24시간 abort rule을 준비합니다. Terraform workflow와 Media Deploy workflow는 별개라 같은 push에서 실행 순서가 보장되지 않습니다. Vault Secrets Operator와 `vso-kubernetes-sync` Kubernetes auth role을 준비하고 KV v2 `secret/kubernetes/media`에 `API_KEY`, `UPLOAD_SIGNING_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`를 저장합니다. `API_KEY`는 호출자가 사용하는 값이어야 합니다. AWS pair에는 두 bucket의 object read/write 권한만 주고 Helm values나 image에는 credentials를 넣지 않습니다. Hope HTTP poller를 활성화할 때 chart values의 `hope.apiUrl`에 HTTPS origin을 설정합니다.
