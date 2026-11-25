@@ -9,8 +9,11 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 spec:
   parentRefs:
-    - name: public
-      namespace: gateway
+    - name: {{ .Values.gateway.name | quote }}
+      namespace: {{ .Values.gateway.namespace | quote }}
+      {{- with .Values.gateway.sectionName }}
+      sectionName: {{ . | quote }}
+      {{- end }}
   hostnames:
     - {{ .Values.host | quote }}
   rules:

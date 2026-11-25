@@ -2,6 +2,12 @@ replicaCount: 1
 
 api:
   enabled: true
+  authSecretName: env
+
+gateway:
+  name: public
+  namespace: gateway
+  sectionName: ''
 
 secrets:
   vaultKubernetesRole: vso-kubernetes-sync

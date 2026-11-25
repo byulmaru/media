@@ -54,12 +54,12 @@ spec:
             - name: API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: env
+                  name: {{ .Values.api.authSecretName | quote }}
                   key: API_KEY
             - name: UPLOAD_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: env
+                  name: {{ .Values.api.authSecretName | quote }}
                   key: UPLOAD_SIGNING_SECRET
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
